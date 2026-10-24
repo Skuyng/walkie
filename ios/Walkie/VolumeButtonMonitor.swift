@@ -4,12 +4,13 @@ import os
 import UIKit
 import SwiftUI
 
-/// Volume-up toggles talk while the app is connected and in the foreground.
+/// Volume-up is hold-to-talk while the app is connected and in the foreground.
 ///
-/// The level is parked at half volume. A press counts only from the system
-/// volume notification when the new level is above that park point. Presses
-/// closer than 350 ms are dropped. Every slider write mutes all volume events
-/// for 600 ms, so the glide back to the park point cannot toggle again.
+/// The first explicit step up starts transmitting. iOS then auto-repeats the
+/// button (after a short pause, then about every 100–250 ms). Each repeat
+/// extends the hold, including when the level is already at the top. If the
+/// repeats stop, transmitting stops. The level is parked back to the middle
+/// only once it reaches the top, and events caused by that write are ignored.
 ///
 /// `MPVolumeView` has to sit on-screen inside the active view (including Mørk
 /// modus) or iOS draws the system volume HUD. The view is hosted by SwiftUI.
@@ -18,53 +19,83 @@ import SwiftUI
 @MainActor
 final class VolumeButtonMonitor {
     static let parkLevel: Float = 0.5
-    private static let pressEpsilon: Float = 0.03
-    private static let pressDebounce: TimeInterval = 0.35
-    private static let ignoreAfterWrite: TimeInterval = 0.60
+    private static let stepEpsilon: Float = 0.01
+    private static let parkTrigger: Float = 0.9
+    private static let parkArrived: Float = 0.02
+    private static let ceiling: Float = 0.98
+    /// First press, before iOS starts auto-repeat (~500 ms later).
+    private static let initialGrace: TimeInterval = 0.70
+    /// Gap allowed between auto-repeat events.
+    private static let repeatGrace: TimeInterval = 0.40
+    private static let resetTimeout: TimeInterval = 1.5
+    private static let sessionIgnore: TimeInterval = 0.80
 
     private let log = Logger(subsystem: "com.skuyng.walkie", category: "volume")
     private let volumeViews = NSHashTable<MPVolumeView>.weakObjects()
 
-    private var onVolumeUp: (@MainActor () -> Void)?
+    private var onHold: (@MainActor (Bool) -> Void)?
     private var enabled = false
     private var ready = false
+    private var holding = false
+    private var resetting = false
     private var savedVolume: Float?
-    private var ignoreUntil = Date.distantPast
-    private var lastAcceptedPress = Date.distantPast
+    private var lastVolume: Float = 0.5
+    private var releaseAt = Date.distantPast
+    private var sessionIgnoreUntil = Date.distantPast
+    /// Readings still at the pre-park level, just after we have landed at 0.5.
+    private var suppressHighUntil = Date.distantPast
     private var notificationTokens: [NSObjectProtocol] = []
-    private var writeGeneration = 0
+    private var holdToken = 0
+    private var resetGeneration = 0
     private var loggedMissingSlider = false
 
     func attach(_ view: MPVolumeView) {
         let already = volumeViews.allObjects.contains { $0 === view }
         volumeViews.add(view)
-        guard enabled, ready, !already else { return }
+        guard enabled, ready, !already, !resetting else { return }
         let current = AVAudioSession.sharedInstance().outputVolume
-        guard abs(current - Self.parkLevel) > Self.pressEpsilon else { return }
-        park()
+        guard current >= Self.parkTrigger else { return }
+        beginPark()
     }
 
     func detach(_ view: MPVolumeView) {
         volumeViews.remove(view)
     }
 
-    func start(onVolumeUp: @escaping @MainActor () -> Void) {
-        self.onVolumeUp = onVolumeUp
+    func start(onHold: @escaping @MainActor (Bool) -> Void) {
+        self.onHold = onHold
         let starting = !enabled
         enabled = true
         installObserversIfNeeded()
         guard starting else { return }
-        savedVolume = AVAudioSession.sharedInstance().outputVolume
+        let current = AVAudioSession.sharedInstance().outputVolume
+        savedVolume = current
+        lastVolume = current
         ready = true
-        park()
+        if current >= Self.parkTrigger {
+            beginPark()
+        }
+    }
+
+    /// Audio-session category, mode, or route changes can post volume
+    /// notifications. They are not button presses.
+    func noteSessionReconfigured() {
+        sessionIgnoreUntil = Date().addingTimeInterval(Self.sessionIgnore)
     }
 
     func stop() {
-        guard enabled || savedVolume != nil else { return }
+        guard enabled || savedVolume != nil || holding else { return }
         enabled = false
         ready = false
-        writeGeneration += 1
-        onVolumeUp = nil
+        resetting = false
+        resetGeneration += 1
+        holdToken += 1
+        releaseAt = .distantPast
+        if holding {
+            holding = false
+            onHold?(false)
+        }
+        onHold = nil
         stopObservers()
         if let savedVolume {
             writeVolume(savedVolume)
@@ -74,7 +105,6 @@ final class VolumeButtonMonitor {
 
     private func installObserversIfNeeded() {
         guard notificationTokens.isEmpty else { return }
-        let session = AVAudioSession.sharedInstance()
         let center = NotificationCenter.default
         for name in ["AVSystemController_SystemVolumeDidChangeNotification", "SystemVolumeDidChange"] {
             notificationTokens.append(center.addObserver(
@@ -93,28 +123,6 @@ final class VolumeButtonMonitor {
                 }
             })
         }
-        notificationTokens.append(center.addObserver(
-            forName: AVAudioSession.routeChangeNotification,
-            object: session,
-            queue: nil
-        ) { [weak self] _ in
-            self?.deliver {
-                guard let self, self.enabled, self.ready else { return }
-                guard Date() >= self.ignoreUntil else { return }
-                self.park()
-            }
-        })
-        notificationTokens.append(center.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: session,
-            queue: nil
-        ) { [weak self] _ in
-            self?.deliver {
-                guard let self, self.enabled, self.ready else { return }
-                guard Date() >= self.ignoreUntil else { return }
-                self.park()
-            }
-        })
     }
 
     private nonisolated func deliver(_ body: @escaping @MainActor () -> Void) {
@@ -134,47 +142,112 @@ final class VolumeButtonMonitor {
         notificationTokens.removeAll()
     }
 
-    /// One source: the system volume notification. Slider writes and their
-    /// glide are ignored wholesale, and only a level above the park point can
-    /// toggle — at most once per debounce window.
+    /// One source: the system volume notification. A rising explicit change
+    /// starts a hold; later repeats keep it alive. Parking is not a press.
     private func handleVolumeNotification(reason: String, volume: Float?) {
         guard enabled, ready else { return }
-        if Date() < ignoreUntil { return }
-        guard reason == "ExplicitVolumeChange" else { return }
         let value = volume ?? AVAudioSession.sharedInstance().outputVolume
-        guard value > Self.parkLevel + Self.pressEpsilon else {
-            if value < Self.parkLevel - Self.pressEpsilon {
-                park()
+        let previous = lastVolume
+        lastVolume = value
+
+        if resetting {
+            if abs(value - Self.parkLevel) < Self.parkArrived {
+                resetting = false
+                suppressHighUntil = Date().addingTimeInterval(Self.repeatGrace)
             }
             return
         }
-        let now = Date()
-        guard now.timeIntervalSince(lastAcceptedPress) >= Self.pressDebounce else { return }
-        lastAcceptedPress = now
-        log.info("Volume up")
-        onVolumeUp?()
-        park()
+        if value >= Self.parkTrigger, Date() < suppressHighUntil {
+            return
+        }
+        let sessionEcho = Date() < sessionIgnoreUntil
+        guard reason == "ExplicitVolumeChange" else { return }
+        if sessionEcho {
+            // A category or route change can post an explicit volume event.
+            // That must not start a hold. An in-progress hold still tracks repeats.
+            if holding, value >= previous - Self.stepEpsilon {
+                armRelease(after: Self.repeatGrace)
+            }
+            return
+        }
+
+        let increased = value > previous + Self.stepEpsilon
+        let decreased = value < previous - Self.stepEpsilon
+        if holding {
+            if !decreased {
+                armRelease(after: Self.repeatGrace)
+            }
+        } else if increased || value >= Self.ceiling {
+            beginHold()
+        }
+        if value >= Self.parkTrigger {
+            beginPark()
+        }
     }
 
-    /// Parks the level. Events caused by this write, including an explicit
-    /// reason and any step of the glide, cannot toggle.
-    private func park() {
-        guard enabled else { return }
-        ignoreUntil = Date().addingTimeInterval(Self.ignoreAfterWrite)
-        writeGeneration += 1
-        let generation = writeGeneration
-        if writeVolume(Self.parkLevel, muting: true) { return }
+    private func beginHold() {
+        guard !holding else { return }
+        holding = true
+        releaseAt = .distantPast
+        armRelease(after: Self.initialGrace)
+        log.info("Volume up")
+        onHold?(true)
+    }
+
+    private func endHold() {
+        guard holding else { return }
+        holding = false
+        holdToken += 1
+        releaseAt = .distantPast
+        log.info("Volume released")
+        onHold?(false)
+    }
+
+    /// Moves the release deadline later. A duplicate of the first press must
+    /// not replace the longer initial grace with the shorter repeat grace.
+    private func armRelease(after delay: TimeInterval) {
+        let proposed = Date().addingTimeInterval(delay)
+        guard proposed > releaseAt else { return }
+        releaseAt = proposed
+        holdToken += 1
+        let token = holdToken
+        let nanoseconds = UInt64(delay * 1_000_000_000)
         Task { @MainActor in
-            for _ in 0..<5 {
-                try? await Task.sleep(nanoseconds: 50_000_000)
-                guard self.enabled, generation == self.writeGeneration else { return }
-                if self.writeVolume(Self.parkLevel, muting: true) { return }
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard token == self.holdToken, self.holding else { return }
+            self.endHold()
+        }
+    }
+
+    /// Parks only near the top of the scale, so a hold can keep repeating.
+    /// The write's own notifications are ignored until the level is back in
+    /// the middle, or until the timeout.
+    private func beginPark() {
+        guard enabled, !resetting else { return }
+        if holding {
+            armRelease(after: Self.initialGrace)
+        }
+        resetting = true
+        resetGeneration += 1
+        let generation = resetGeneration
+        if !writeVolume(Self.parkLevel) {
+            Task { @MainActor in
+                for _ in 0..<5 {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    guard self.enabled, generation == self.resetGeneration, self.resetting else { return }
+                    if self.writeVolume(Self.parkLevel) { break }
+                }
             }
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(Self.resetTimeout * 1_000_000_000))
+            guard generation == self.resetGeneration, self.resetting else { return }
+            self.resetting = false
         }
     }
 
     @discardableResult
-    private func writeVolume(_ value: Float, muting: Bool = false) -> Bool {
+    private func writeVolume(_ value: Float) -> Bool {
         guard let slider = sliderInHierarchy() else {
             if !loggedMissingSlider {
                 loggedMissingSlider = true
@@ -183,9 +256,6 @@ final class VolumeButtonMonitor {
             return false
         }
         loggedMissingSlider = false
-        if muting {
-            ignoreUntil = Date().addingTimeInterval(Self.ignoreAfterWrite)
-        }
         slider.setValue(value, animated: false)
         slider.sendActions(for: .valueChanged)
         return true

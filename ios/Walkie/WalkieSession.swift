@@ -86,6 +86,11 @@ final class WalkieSession: ObservableObject {
         engine.onInterrupted = { [weak self] in
             Task { @MainActor in self?.endTransmitting() }
         }
+        engine.onSessionReconfigured = { [weak self] in
+            Task { @MainActor in
+                self?.volumeButtons.noteSessionReconfigured()
+            }
+        }
     }
 
     func savePreferences() {
@@ -152,12 +157,17 @@ final class WalkieSession: ObservableObject {
         transmitter.endTransmitting()
     }
 
-    /// Volume-up toggles transmitting only while the caller reports that the
+    /// Volume-up holds transmitting only while the caller reports that the
     /// app is in the foreground and the channel is connected.
     func setVolumeButtonMonitoringEnabled(_ enabled: Bool) {
         if enabled {
-            volumeButtons.start { [weak self] in
-                self?.toggleFromVolumeButton()
+            volumeButtons.start { [weak self] holding in
+                guard let self else { return }
+                if holding {
+                    self.beginTransmitting()
+                } else {
+                    self.endTransmitting()
+                }
             }
         } else {
             volumeButtons.stop()
@@ -170,15 +180,6 @@ final class WalkieSession: ObservableObject {
 
     func detachSystemVolumeView(_ view: MPVolumeView) {
         volumeButtons.detach(view)
-    }
-
-    private func toggleFromVolumeButton() {
-        guard linkState == .connected else { return }
-        if isTalking {
-            endTransmitting()
-        } else {
-            beginTransmitting()
-        }
     }
 
     func resumeAudioIfNeeded() {

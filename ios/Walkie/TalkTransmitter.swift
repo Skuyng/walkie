@@ -11,7 +11,7 @@ protocol ChannelSignaling: AnyObject {
 
 /// How the user takes the channel.
 ///
-/// The on-screen button uses `HoldToTalkTransmitter` (hold). Volume-up toggles
+/// The on-screen button uses `HoldToTalkTransmitter` (hold). Volume-up holds
 /// the same start/stop signals while the app is connected and in the foreground.
 /// A later type can adopt this protocol with `PTChannelManager` from
 /// PushToTalk.framework. That framework needs the Push to Talk capability on a

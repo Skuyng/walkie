@@ -28,6 +28,9 @@ enum VoiceEngineError: LocalizedError, Equatable {
 final class VoiceEngine {
     var onFailure: ((String) -> Void)?
     var onInterrupted: (() -> Void)?
+    /// Category, mode, activation, or speaker override changed. Not used for
+    /// opening or closing the microphone during talk.
+    var onSessionReconfigured: (() -> Void)?
 
     private let log = Logger(subsystem: "com.skuyng.walkie", category: "audio")
     private let queue = DispatchQueue(label: "com.skuyng.walkie.audio", qos: .userInteractive)
@@ -97,6 +100,9 @@ final class VoiceEngine {
         handlerLock.unlock()
     }
 
+    /// Opens or closes the capture gate only. The `playAndRecord` session stays
+    /// as it was for the whole connection; changing category or mode here makes
+    /// iOS post volume events and looks like another button press.
     func setMicrophoneOpen(_ open: Bool) {
         micOpen.withLock { $0 = open }
     }
@@ -271,6 +277,7 @@ final class VoiceEngine {
         try? session.setPreferredIOBufferDuration(0.04)
         try session.setActive(true)
         applyOutputRoute()
+        reportSessionReconfigured()
     }
 
     private func buildAndStart() throws {
@@ -532,6 +539,7 @@ final class VoiceEngine {
         do {
             try session.overrideOutputAudioPort(desired)
             lastOverride = desired
+            reportSessionReconfigured()
         } catch {
             log.error("Output route failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -570,6 +578,17 @@ final class VoiceEngine {
 
     private func handleMediaReset() {
         restartAudio("Lyden ble tilbakestilt og kunne ikke startes igjen.")
+    }
+
+    private func reportSessionReconfigured() {
+        let callback = onSessionReconfigured
+        if Thread.isMainThread {
+            callback?()
+        } else {
+            DispatchQueue.main.async {
+                callback?()
+            }
+        }
     }
 
     private func reportFailure(_ message: String) {

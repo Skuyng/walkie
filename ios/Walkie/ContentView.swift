@@ -173,7 +173,7 @@ struct ContentView: View {
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.secondary)
 
-                    Label("Volum opp starter og stopper sending", systemImage: "speaker.wave.2.fill")
+                    Label("Hold volum opp inne for å snakke", systemImage: "speaker.wave.2.fill")
                         .font(.footnote)
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.secondary)
@@ -246,7 +246,7 @@ struct ContentView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(session.isTalking ? "Snakker" : "Hold for å snakke")
-        .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe. Volum opp starter og stopper sending.")
+        .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe. Hold volum opp inne for å snakke.")
         .accessibilityAction {
             if session.isTalking {
                 session.endTransmitting()
