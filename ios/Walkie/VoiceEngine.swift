@@ -132,7 +132,7 @@ final class VoiceEngine {
     /// system HUD. Playback avoids the microphone prompt; the call session
     /// replaces it once audio actually starts.
     func activateForSystemVolume() {
-        let apply = { [weak self] in
+        let apply: () -> Void = { [weak self] in
             self?.activateIdleSessionOnMain()
         }
         if Thread.isMainThread {
@@ -144,7 +144,7 @@ final class VoiceEngine {
 
     /// Drops the launch session when the app backgrounds, without touching a live call.
     func deactivateIdleSessionIfNeeded() {
-        let apply = { [weak self] in
+        let apply: () -> Void = { [weak self] in
             guard let self, self.engineOwnsSession == false else { return }
             try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         }
