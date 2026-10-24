@@ -2,9 +2,10 @@ import AVFoundation
 import Foundation
 import os
 
-enum VoiceEngineError: LocalizedError {
+enum VoiceEngineError: LocalizedError, Equatable {
     case noInput
     case failedToStart
+    case microphoneDenied
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +13,8 @@ enum VoiceEngineError: LocalizedError {
             return "Fant ingen mikrofon."
         case .failedToStart:
             return "Fikk ikke startet lyden."
+        case .microphoneDenied:
+            return "Walkie får ikke bruke mikrofonen. Åpne Innstillinger og slå på Mikrofon for Walkie."
         }
     }
 }
@@ -99,10 +102,7 @@ final class VoiceEngine {
     }
 
     func start() throws {
-        try queue.sync {
-            if shouldRun, engine?.isRunning == true { return }
-            try startOnQueue()
-        }
+        try startFresh(force: false)
     }
 
     func stop() {
@@ -110,17 +110,19 @@ final class VoiceEngine {
             shouldRun = false
             tearDownEngineOnly()
             lastOverride = nil
-            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         }
+        deactivateSession()
     }
 
     func ensureRunning() {
-        queue.async { [weak self] in
-            guard let self, self.shouldRun, self.engine?.isRunning != true else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let needsStart = self.queue.sync { self.shouldRun && self.engine?.isRunning != true }
+            guard needsStart else { return }
             do {
-                try self.startOnQueue()
+                try self.startFresh(force: false)
             } catch {
-                self.reportFailure("Lyden stoppet og kunne ikke startes igjen.")
+                self.reportFailure(Self.failureMessage(for: error, fallback: "Lyden stoppet og kunne ikke startes igjen."))
             }
         }
     }
@@ -153,49 +155,138 @@ final class VoiceEngine {
         }
     }
 
-    private func startOnQueue() throws {
-        tearDownEngineOnly()
+    /// Session setup stays on the main thread. `inputNode` is only read after
+    /// `playAndRecord` is active, because a node created earlier sticks at 0 Hz.
+    private func startFresh(force: Bool) throws {
+        if Thread.isMainThread {
+            try startFreshOnMain(force: force)
+        } else {
+            var thrown: Error?
+            DispatchQueue.main.sync {
+                do {
+                    try self.startFreshOnMain(force: force)
+                } catch {
+                    thrown = error
+                }
+            }
+            if let thrown { throw thrown }
+        }
+    }
+
+    private func startFreshOnMain(force: Bool) throws {
+        try requireMicrophonePermission()
+        if !force {
+            let running = queue.sync { shouldRun && engine?.isRunning == true }
+            if running { return }
+        }
+
         var lastError: Error = VoiceEngineError.failedToStart
-        for voiceChat in [true, false] {
+        var retriedZeroFormat = false
+        var modeIndex = 0
+        let voiceChatModes = [true, false]
+        while modeIndex < voiceChatModes.count {
+            let voiceChat = voiceChatModes[modeIndex]
+            modeIndex += 1
             do {
-                try activateSession(voiceChat: voiceChat)
-                try buildAndStart()
-                shouldRun = true
+                queue.sync { self.tearDownEngineOnly() }
+                try activateSession(voiceChat: voiceChat, preferWireRate: !retriedZeroFormat)
+                try queue.sync {
+                    try self.buildAndStart()
+                    self.shouldRun = true
+                }
                 log.info("Audio engine running voiceChat=\(voiceChat, privacy: .public)")
                 return
+            } catch VoiceEngineError.noInput where !retriedZeroFormat {
+                retriedZeroFormat = true
+                lastError = VoiceEngineError.noInput
+                log.error("Microphone format is 0; reactivating the session and retrying once")
+                modeIndex -= 1
+                releaseEngineAndSession()
             } catch {
                 lastError = error
                 log.error("Audio start failed: \(error.localizedDescription, privacy: .public)")
-                tearDownEngineOnly()
-                lastOverride = nil
-                try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+                releaseEngineAndSession()
             }
         }
-        shouldRun = false
+        queue.sync { self.shouldRun = false }
         throw lastError
     }
 
-    private func activateSession(voiceChat: Bool) throws {
+    private func requireMicrophonePermission() throws {
+        guard AVAudioApplication.shared.recordPermission == .granted else {
+            throw VoiceEngineError.microphoneDenied
+        }
+    }
+
+    private func releaseEngineAndSession() {
+        queue.sync {
+            self.shouldRun = false
+            self.tearDownEngineOnly()
+            self.lastOverride = nil
+        }
+        deactivateSession()
+    }
+
+    private func deactivateSession() {
+        let deactivate = {
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        }
+        if Thread.isMainThread {
+            deactivate()
+        } else {
+            DispatchQueue.main.sync(execute: deactivate)
+        }
+    }
+
+    private func restartAudio(_ message: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let allowed = self.queue.sync { self.shouldRun }
+            guard allowed else { return }
+            do {
+                try self.startFresh(force: true)
+            } catch {
+                self.reportFailure(Self.failureMessage(for: error, fallback: message))
+            }
+        }
+    }
+
+    private static func failureMessage(for error: Error, fallback: String) -> String {
+        if let engineError = error as? VoiceEngineError, let description = engineError.errorDescription {
+            return description
+        }
+        return fallback
+    }
+
+    private func activateSession(voiceChat: Bool, preferWireRate: Bool) throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
             .playAndRecord,
             mode: voiceChat ? .voiceChat : .default,
             options: [.defaultToSpeaker, .allowBluetoothHFP]
         )
-        try? session.setPreferredSampleRate(PCM16.sampleRate)
+        if preferWireRate {
+            try? session.setPreferredSampleRate(PCM16.sampleRate)
+        }
         try? session.setPreferredIOBufferDuration(0.04)
         try session.setActive(true)
         applyOutputRoute()
     }
 
     private func buildAndStart() throws {
+        let session = AVAudioSession.sharedInstance()
+        guard session.category == .playAndRecord else {
+            log.error("Refusing to open the microphone before playAndRecord is active")
+            throw VoiceEngineError.failedToStart
+        }
+
         let engine = AVAudioEngine()
         let voice = AVAudioPlayerNode()
         let beep = AVAudioPlayerNode()
         engine.attach(voice)
         engine.attach(beep)
 
-        let rate = AVAudioSession.sharedInstance().sampleRate
+        let rate = session.sampleRate
         let sampleRate = rate > 0 ? rate : 48_000
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
             throw VoiceEngineError.failedToStart
@@ -214,6 +305,15 @@ final class VoiceEngine {
         self.primeTimer?.cancel()
         self.primeTimer = nil
 
+        // Touch inputNode only after the session is playAndRecord and active.
+        guard let inputFormat = tapFormat(for: engine) else {
+            throw VoiceEngineError.noInput
+        }
+        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+            self?.handleInput(buffer)
+        }
+        tapInstalled = true
+
         engine.prepare()
         try engine.start()
 
@@ -226,17 +326,32 @@ final class VoiceEngine {
             throw VoiceEngineError.failedToStart
         }
         self.decoder = decoder
-
-        let inputFormat = engine.inputNode.outputFormat(forBus: 0)
-        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            throw VoiceEngineError.noInput
-        }
-        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            self?.handleInput(buffer)
-        }
-        tapInstalled = true
         voice.play()
         beep.play()
+    }
+
+    /// `outputFormat` is 0 Hz on a real iPhone when the input node was realized
+    /// too early. `inputFormat(forBus:)` is the hardware format and is usable then.
+    private func tapFormat(for engine: AVAudioEngine) -> AVAudioFormat? {
+        let input = engine.inputNode
+        // Read the hardware format first. outputFormat is 0 Hz on device when the
+        // node has no converter yet, and reading it first can keep the node there.
+        let hardware = input.inputFormat(forBus: 0)
+        let output = input.outputFormat(forBus: 0)
+        if Self.isUsable(output) {
+            log.info("Mic outputFormat \(output.sampleRate, privacy: .public) Hz, \(output.channelCount, privacy: .public) ch")
+            return output
+        }
+        if Self.isUsable(hardware) {
+            log.info("Mic outputFormat was 0; using inputFormat \(hardware.sampleRate, privacy: .public) Hz, \(hardware.channelCount, privacy: .public) ch")
+            return hardware
+        }
+        log.error("Mic outputFormat and inputFormat are both 0")
+        return nil
+    }
+
+    private static func isUsable(_ format: AVAudioFormat) -> Bool {
+        format.sampleRate > 0 && format.channelCount > 0
     }
 
     private func tearDownEngineOnly() {
@@ -434,14 +549,7 @@ final class VoiceEngine {
             let optionsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
             guard options.contains(.shouldResume) else { return }
-            queue.async { [weak self] in
-                guard let self, self.shouldRun else { return }
-                do {
-                    try self.startOnQueue()
-                } catch {
-                    self.reportFailure("Lyden ble avbrutt og kunne ikke startes igjen.")
-                }
-            }
+            restartAudio("Lyden ble avbrutt og kunne ikke startes igjen.")
         @unknown default:
             break
         }
@@ -453,11 +561,7 @@ final class VoiceEngine {
             let rate = AVAudioSession.sharedInstance().sampleRate
             let current = self.playbackFormat?.sampleRate ?? 0
             if current > 0, rate > 0, abs(rate - current) > 1 {
-                do {
-                    try self.startOnQueue()
-                } catch {
-                    self.reportFailure("Lydutgangen endret seg, og lyden kunne ikke startes igjen.")
-                }
+                self.restartAudio("Lydutgangen endret seg, og lyden kunne ikke startes igjen.")
             } else {
                 self.applyOutputRoute()
             }
@@ -465,14 +569,7 @@ final class VoiceEngine {
     }
 
     private func handleMediaReset() {
-        queue.async { [weak self] in
-            guard let self, self.shouldRun else { return }
-            do {
-                try self.startOnQueue()
-            } catch {
-                self.reportFailure("Lyden ble tilbakestilt og kunne ikke startes igjen.")
-            }
-        }
+        restartAudio("Lyden ble tilbakestilt og kunne ikke startes igjen.")
     }
 
     private func reportFailure(_ message: String) {

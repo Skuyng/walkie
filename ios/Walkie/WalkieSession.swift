@@ -73,9 +73,13 @@ final class WalkieSession: ObservableObject {
         }
         engine.onFailure = { [weak self] message in
             Task { @MainActor in
-                self?.audioReady = false
-                self?.errorMessage = message
-                self?.suggestsSettings = false
+                guard let self else { return }
+                self.audioReady = false
+                let denied = AVAudioApplication.shared.recordPermission != .granted
+                self.errorMessage = denied
+                    ? VoiceEngineError.microphoneDenied.localizedDescription
+                    : message
+                self.suggestsSettings = denied
             }
         }
         engine.onInterrupted = { [weak self] in
@@ -177,16 +181,17 @@ final class WalkieSession: ObservableObject {
         let granted = await requestMicrophoneAccess()
         guard shouldReconnect, !Task.isCancelled else { return }
         guard granted else {
-            failBeforeSession(
-                "Mikrofonen er ikke tillatt. Slå på mikrofon for Walkie i Innstillinger.",
-                settings: true
-            )
+            failBeforeSession(VoiceEngineError.microphoneDenied.localizedDescription, settings: true)
             return
         }
         do {
             try engine.start()
+        } catch VoiceEngineError.microphoneDenied {
+            failBeforeSession(VoiceEngineError.microphoneDenied.localizedDescription, settings: true)
+            return
         } catch let error as VoiceEngineError {
-            failBeforeSession(error.localizedDescription, settings: false)
+            let denied = AVAudioApplication.shared.recordPermission != .granted
+            failBeforeSession(error.localizedDescription, settings: denied)
             return
         } catch {
             failBeforeSession("Fikk ikke startet lyden.", settings: false)
@@ -202,17 +207,10 @@ final class WalkieSession: ObservableObject {
         socket.connect(url: activeURL)
     }
 
+    /// Always asks before the engine starts. A granted or denied answer returns
+    /// immediately; the system sheet is shown only when the choice is still open.
     private func requestMicrophoneAccess() async -> Bool {
-        switch AVAudioApplication.shared.recordPermission {
-        case .granted:
-            return true
-        case .denied:
-            return false
-        case .undetermined:
-            return await AVAudioApplication.requestRecordPermission()
-        @unknown default:
-            return false
-        }
+        await AVAudioApplication.requestRecordPermission()
     }
 
     private func failBeforeSession(_ message: String, settings: Bool) {

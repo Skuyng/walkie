@@ -48,7 +48,7 @@ struct ContentView: View {
             syncDarkMode(with: phase)
             refreshVolumeButtons()
         }
-        .alert("Obs", isPresented: errorPresented) {
+        .alert(session.suggestsSettings ? "Mikrofon" : "Obs", isPresented: errorPresented) {
             Button("OK", role: .cancel) {}
             if session.suggestsSettings {
                 Button("Åpne Innstillinger") {
