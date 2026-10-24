@@ -1,6 +1,6 @@
 # Walkie for iPhone
 
-Walkie er en enkel walkie-talkie. Appen kobler seg til den samme serveren som nettsiden, med navn og kanalkode. Hold den store knappen inne for å snakke. Du hører de andre i kanalen, også når skjermen er låst.
+Walkie er en enkel walkie-talkie. Appen kobler seg til den samme serveren som nettsiden, med navn og kanalkode. Hold den store knappen inne for å snakke, eller trykk volum opp for å starte og stoppe. Du hører de andre i kanalen, også når skjermen er låst.
 
 Standard server er `wss://walkie-bc0z.onrender.com`. Adressen kan endres i appen. Navn, kanalkode og server lagres på telefonen (UserDefaults).
 
@@ -23,7 +23,7 @@ Du trenger en Mac med Xcode 26 og en iPhone med iOS 17 eller nyere. En betalt ut
 11. Trykk **Run** (▶). Første bygging tar litt tid. Telefonen må være ulåst.
 12. Hvis appen ikke starter fordi utvikleren ikke er klarert: på iPhone, **Innstillinger → Generelt → VPN og enhetsadministrasjon** (på noen versjoner heter det **Enhetsadministrasjon**). Velg profilen din og trykk **Stol på**.
 13. Åpne Walkie og tillat mikrofon når iOS spør.
-14. Skriv navn og kanalkode, sjekk serveradressen, og trykk **Koble til**. Hold den store knappen inne for å snakke.
+14. Skriv navn og kanalkode, sjekk serveradressen, og trykk **Koble til**. Hold den store knappen inne for å snakke. Volum opp starter og stopper sending mens appen er i forgrunnen.
 
 En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xcode på nytt. Et personlig team kan bare ha noen få egne apper installert samtidig.
 
@@ -33,6 +33,8 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Kanalkode** — felles kode, for eksempel `familie`. Store og små bokstaver er samme kanal (maks 40 tegn).
 - **Server** — `wss://walkie-bc0z.onrender.com` som standard. `https://` gjøres om til `wss://`, og `http://` til `ws://`. Tomt felt bruker standardadressen.
 - **Hold for å snakke** — lyd sendes bare mens knappen holdes inne.
+- **Volum opp** — starter sending første gang og stopper den neste, mens appen er tilkoblet og i forgrunnen. Lydnivået settes tilbake, så knappen kan brukes igjen. Volum ned endrer lydnivået som vanlig. Volumvisningen fra systemet er skjult mens dette er aktivt.
+- **Mørk modus** — svart skjerm, lav lysstyrke, og telefonen holder seg våken. Et svakt rødt punkt vises mens du sender. Trykk skjermen for å avslutte. Volum opp virker her også.
 - Når noen andre begynner eller slutter å snakke, spilles en kort tone, og navnet vises.
 
 ## Lyd og protokoll
@@ -54,7 +56,7 @@ Nettleseren plukker nærmeste sample når den nedsampler. iOS bruker `AVAudioCon
 
 `Info.plist` har `UIBackgroundModes` satt til `audio`. Lydøkten er `playAndRecord`, med `defaultToSpeaker` og Bluetooth-headset (`allowBluetoothHFP`, dagens navn på `allowBluetooth`). Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle, slik at innkommende tale kan fortsette når skjermen er låst.
 
-Den oransje mikrofonprikken lyser mens du er tilkoblet, fordi appen holder lydøkten i gang for å kunne ta imot tale i bakgrunnen. Du sender ikke lyd før du holder knappen inne.
+Den oransje mikrofonprikken lyser mens du er tilkoblet, fordi appen holder lydøkten i gang for å kunne ta imot tale i bakgrunnen. Du sender ikke lyd før du holder knappen inne, eller veksler sending med volum opp.
 
 Dette er ikke Apples Push to Talk. Det rammeverket er ikke koblet inn.
 

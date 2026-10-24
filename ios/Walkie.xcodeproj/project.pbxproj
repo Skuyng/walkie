@@ -14,6 +14,8 @@
 		A10000000000000000000005 /* VoiceEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* VoiceEngine.swift */; };
 		A10000000000000000000006 /* PCM16.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* PCM16.swift */; };
 		A10000000000000000000007 /* TalkTransmitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* TalkTransmitter.swift */; };
+		A10000000000000000000008 /* VolumeButtonMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* VolumeButtonMonitor.swift */; };
+		A10000000000000000000009 /* MediaPlayer.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* MediaPlayer.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -25,6 +27,8 @@
 		A20000000000000000000006 /* PCM16.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PCM16.swift; sourceTree = "<group>"; };
 		A20000000000000000000007 /* TalkTransmitter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TalkTransmitter.swift; sourceTree = "<group>"; };
 		A20000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A20000000000000000000009 /* VolumeButtonMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeButtonMonitor.swift; sourceTree = "<group>"; };
+		A2000000000000000000000A /* MediaPlayer.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MediaPlayer.framework; path = System/Library/Frameworks/MediaPlayer.framework; sourceTree = SDKROOT; };
 		A30000000000000000000001 /* Walkie.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Walkie.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -33,6 +37,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A10000000000000000000009 /* MediaPlayer.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -43,6 +48,7 @@
 			isa = PBXGroup;
 			children = (
 				A50000000000000000000002 /* Walkie */,
+				A50000000000000000000004 /* Frameworks */,
 				A50000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -57,6 +63,7 @@
 				A20000000000000000000005 /* VoiceEngine.swift */,
 				A20000000000000000000006 /* PCM16.swift */,
 				A20000000000000000000007 /* TalkTransmitter.swift */,
+				A20000000000000000000009 /* VolumeButtonMonitor.swift */,
 				A20000000000000000000008 /* Info.plist */,
 			);
 			path = Walkie;
@@ -68,6 +75,14 @@
 				A30000000000000000000001 /* Walkie.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		A50000000000000000000004 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A2000000000000000000000A /* MediaPlayer.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -147,6 +162,7 @@
 				A10000000000000000000005 /* VoiceEngine.swift in Sources */,
 				A10000000000000000000006 /* PCM16.swift in Sources */,
 				A10000000000000000000007 /* TalkTransmitter.swift in Sources */,
+				A10000000000000000000008 /* VolumeButtonMonitor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

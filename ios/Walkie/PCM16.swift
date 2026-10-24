@@ -25,11 +25,8 @@ enum PCM16 {
         guard count > 0 else { return [] }
         var ints = [Int16](repeating: 0, count: count)
         let byteCount = count * MemoryLayout<Int16>.size
-        data.withUnsafeBytes { raw in
-            guard let source = raw.baseAddress else { return }
-            ints.withUnsafeMutableBytes { destination in
-                destination.copyMemory(from: source, byteCount: byteCount)
-            }
+        _ = ints.withUnsafeMutableBytes { destination in
+            data.copyBytes(to: destination, count: byteCount)
         }
         return ints.map { Float($0) / 32_768 }
     }

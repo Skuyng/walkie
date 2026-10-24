@@ -37,6 +37,7 @@ final class WalkieSession: ObservableObject {
     private let engine = VoiceEngine()
     private let socket = WalkieSocket()
     private let transmitter = HoldToTalkTransmitter()
+    private let volumeButtons = VolumeButtonMonitor()
     private var activeURL: URL?
     private var shouldReconnect = false
     private var connectTask: Task<Void, Never>?
@@ -126,6 +127,7 @@ final class WalkieSession: ObservableObject {
         shouldReconnect = false
         connectTask?.cancel()
         reconnectTask?.cancel()
+        setVolumeButtonMonitoringEnabled(false)
         endTransmitting()
         socket.close()
         engine.stop()
@@ -143,6 +145,27 @@ final class WalkieSession: ObservableObject {
 
     func endTransmitting() {
         transmitter.endTransmitting()
+    }
+
+    /// Volume-up toggles transmitting only while the caller reports that the
+    /// app is in the foreground and the channel is connected.
+    func setVolumeButtonMonitoringEnabled(_ enabled: Bool) {
+        if enabled {
+            volumeButtons.start { [weak self] in
+                self?.toggleFromVolumeButton()
+            }
+        } else {
+            volumeButtons.stop()
+        }
+    }
+
+    private func toggleFromVolumeButton() {
+        guard linkState == .connected else { return }
+        if isTalking {
+            endTransmitting()
+        } else {
+            beginTransmitting()
+        }
     }
 
     func resumeAudioIfNeeded() {

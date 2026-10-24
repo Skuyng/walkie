@@ -11,11 +11,12 @@ protocol ChannelSignaling: AnyObject {
 
 /// How the user takes the channel.
 ///
-/// The on-screen button uses `HoldToTalkTransmitter`. A later type can adopt
-/// this protocol with `PTChannelManager` from PushToTalk.framework and call
-/// the same start/stop signals. That framework needs the Push to Talk
-/// capability on a paid Apple Developer account, so it is not linked here.
-/// A free personal team can still build and install this target.
+/// The on-screen button uses `HoldToTalkTransmitter` (hold). Volume-up toggles
+/// the same start/stop signals while the app is connected and in the foreground.
+/// A later type can adopt this protocol with `PTChannelManager` from
+/// PushToTalk.framework. That framework needs the Push to Talk capability on a
+/// paid Apple Developer account, so it is not linked here. A free personal team
+/// can still build and install this target.
 @MainActor
 protocol ChannelTransmitter: AnyObject {
     var isTransmitting: Bool { get }

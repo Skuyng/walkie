@@ -5,6 +5,8 @@ struct ContentView: View {
     @StateObject private var session = WalkieSession()
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var focus: Field?
+    @State private var darkMode = false
+    @State private var savedBrightness: CGFloat?
 
     private enum Field: Hashable {
         case name, room, server
@@ -18,17 +20,33 @@ struct ContentView: View {
             } else {
                 loginScreen
             }
+            if darkMode {
+                darkOverlay
+            }
         }
         .preferredColorScheme(.dark)
+        .statusBarHidden(darkMode)
+        .persistentSystemOverlays(darkMode ? .hidden : .automatic)
+        .onAppear { refreshVolumeButtons() }
+        .onDisappear {
+            exitDarkMode()
+            session.setVolumeButtonMonitoringEnabled(false)
+        }
         .onChange(of: session.name) { _, _ in session.savePreferences() }
         .onChange(of: session.room) { _, _ in session.savePreferences() }
         .onChange(of: session.serverURL) { _, _ in session.savePreferences() }
+        .onChange(of: session.linkState) { _, _ in refreshVolumeButtons() }
+        .onChange(of: session.hasConnectedOnce) { _, connected in
+            if !connected { exitDarkMode() }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
                 session.endTransmitting()
             } else if phase == .active {
                 session.resumeAudioIfNeeded()
             }
+            syncDarkMode(with: phase)
+            refreshVolumeButtons()
         }
         .alert("Obs", isPresented: errorPresented) {
             Button("OK", role: .cancel) {}
@@ -116,7 +134,7 @@ struct ContentView: View {
 
     private var talkScreen: some View {
         GeometryReader { geo in
-            let side = min(geo.size.width - 20, geo.size.height * 0.52)
+            let side = min(geo.size.width - 20, max(200, geo.size.height - 340))
             VStack(spacing: 14) {
                 Text("Kanal: \(session.room)")
                     .font(.title2.weight(.semibold))
@@ -152,7 +170,7 @@ struct ContentView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel(session.isTalking ? "Snakker" : "Hold for å snakke")
-                .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe.")
+                .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe. Volum opp starter og stopper sending.")
                 .accessibilityAction {
                     if session.isTalking {
                         session.endTransmitting()
@@ -169,16 +187,86 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
 
-                Button("Koble fra", role: .destructive) {
-                    session.disconnect()
+                Text("Volum opp starter og stopper sending")
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    Button("Mørk modus") { enterDarkMode() }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+                        .accessibilityHint("Svart skjerm med lav lysstyrke. Trykk skjermen for å avslutte.")
+                    Button("Koble fra", role: .destructive) {
+                        session.disconnect()
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
                 }
-                .buttonStyle(.bordered)
-                .tint(.white)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private var darkOverlay: some View {
+        ZStack {
+            Color.black
+            if session.isTalking {
+                Circle()
+                    .fill(Color.red.opacity(0.22))
+                    .frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
+        .contentShape(Rectangle())
+        .onTapGesture { exitDarkMode() }
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(session.isTalking ? "Mørk modus. Snakker." : "Mørk modus")
+        .accessibilityHint("Trykk for å avslutte")
+        .accessibilityAction { exitDarkMode() }
+    }
+
+    private func enterDarkMode() {
+        if savedBrightness == nil {
+            savedBrightness = UIScreen.main.brightness
+        }
+        darkMode = true
+        UIApplication.shared.isIdleTimerDisabled = true
+        UIScreen.main.brightness = 0
+    }
+
+    private func exitDarkMode() {
+        guard darkMode || savedBrightness != nil else { return }
+        darkMode = false
+        if let savedBrightness {
+            UIScreen.main.brightness = savedBrightness
+        }
+        savedBrightness = nil
+        UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    private func syncDarkMode(with phase: ScenePhase) {
+        guard darkMode else { return }
+        UIApplication.shared.isIdleTimerDisabled = true
+        if phase == .active {
+            let current = UIScreen.main.brightness
+            if let saved = savedBrightness, current > 0.02, abs(current - saved) > 0.02 {
+                savedBrightness = current
+            }
+            UIScreen.main.brightness = 0
+        } else if let savedBrightness {
+            UIScreen.main.brightness = savedBrightness
+        }
+    }
+
+    private func refreshVolumeButtons() {
+        let listen = scenePhase == .active && session.linkState == .connected
+        session.setVolumeButtonMonitoringEnabled(listen)
     }
 
     private var talkGesture: some Gesture {
