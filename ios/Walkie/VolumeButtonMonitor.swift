@@ -12,10 +12,11 @@ import SwiftUI
 /// The level is parked back to the middle after the hold ends, never during it,
 /// and events caused by that write are ignored.
 ///
-/// `MPVolumeView` has to sit on-screen inside the active view (including Mørk
-/// modus) or iOS draws the system volume HUD. The view is hosted by SwiftUI.
-/// The unpublished volume notification is the only press source. This target
-/// is sideloaded, not shipped through the App Store.
+/// `MPVolumeView` has to sit on-screen inside the active view (normal UI and
+/// Mørk modus) or iOS draws the system volume HUD. A second copy is pinned in
+/// the window whenever the hosted view is on screen. The unpublished volume
+/// notification is the only press source. This target is sideloaded, not
+/// shipped through the App Store.
 @MainActor
 final class VolumeButtonMonitor {
     static let parkLevel: Float = 0.5
@@ -291,7 +292,7 @@ final class VolumeButtonMonitor {
 }
 
 /// On-screen volume slider. Alpha stays just above zero so iOS suppresses the
-/// system HUD, including over the black Mørk modus overlay.
+/// system HUD on every screen, including the normal UI and Mørk modus.
 @MainActor
 struct HiddenSystemVolumeView: UIViewRepresentable {
     let session: WalkieSession
@@ -301,7 +302,11 @@ struct HiddenSystemVolumeView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> MPVolumeView {
-        HiddenVolumeSliderView(frame: CGRect(x: 0, y: 0, width: 80, height: 24))
+        let view = HiddenVolumeSliderView(frame: CGRect(x: 0, y: 0, width: 24, height: 24))
+        view.onWindowChange = { window in
+            context.coordinator.pinSuppressor(in: window)
+        }
+        return view
     }
 
     func updateUIView(_ uiView: MPVolumeView, context: Context) {
@@ -309,6 +314,7 @@ struct HiddenSystemVolumeView: UIViewRepresentable {
         uiView.isHidden = false
         context.coordinator.session = session
         session.attachSystemVolumeView(uiView)
+        context.coordinator.pinSuppressor(in: uiView.window)
     }
 
     static func dismantleUIView(_ uiView: MPVolumeView, coordinator: Coordinator) {
@@ -323,12 +329,71 @@ struct HiddenSystemVolumeView: UIViewRepresentable {
         init(session: WalkieSession) {
             self.session = session
         }
+
+        func pinSuppressor(in window: UIWindow?) {
+            let session = session
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    guard let window, let session else { return }
+                    SystemVolumeHUDSuppressor.pin(to: window, session: session)
+                }
+            } else {
+                Task { @MainActor in
+                    guard let window, let session else { return }
+                    SystemVolumeHUDSuppressor.pin(to: window, session: session)
+                }
+            }
+        }
+    }
+}
+
+/// One on-screen slider per window. SwiftUI sometimes gives the hosted
+/// `MPVolumeView` a frame the system does not treat as visible, and then the
+/// volume HUD comes back. This copy stays in the window at a tiny non-zero frame.
+@MainActor
+private enum SystemVolumeHUDSuppressor {
+    private static var anchors: [ObjectIdentifier: MPVolumeView] = [:]
+
+    static func pin(to window: UIWindow, session: WalkieSession) {
+        anchors = anchors.filter { $0.value.superview != nil }
+        let key = ObjectIdentifier(window)
+        let frame = onScreenFrame(in: window)
+        let anchor: MPVolumeView
+        if let existing = anchors[key], existing.superview === window {
+            anchor = existing
+        } else {
+            anchors[key]?.removeFromSuperview()
+            let created = MPVolumeView(frame: frame)
+            configure(created)
+            window.addSubview(created)
+            anchors[key] = created
+            anchor = created
+        }
+        anchor.frame = frame
+        configure(anchor)
+        window.bringSubviewToFront(anchor)
+        session.attachSystemVolumeView(anchor)
+    }
+
+    private static func onScreenFrame(in window: UIWindow) -> CGRect {
+        CGRect(x: 12, y: window.safeAreaInsets.top + 8, width: 24, height: 24)
+    }
+
+    private static func configure(_ view: MPVolumeView) {
+        view.alpha = 0.01
+        view.isHidden = false
+        view.clipsToBounds = false
+        view.backgroundColor = .clear
+        view.showsRouteButton = false
+        view.isUserInteractionEnabled = false
     }
 }
 
 /// Keeps alpha just above zero. SwiftUI must not be allowed to mark the view
 /// hidden, or the system volume HUD comes back.
 private final class HiddenVolumeSliderView: MPVolumeView {
+    var onWindowChange: ((UIWindow?) -> Void)?
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         configure()
@@ -353,19 +418,20 @@ private final class HiddenVolumeSliderView: MPVolumeView {
         super.didMoveToWindow()
         super.alpha = 0.01
         super.isHidden = false
+        onWindowChange?(window)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         super.alpha = 0.01
         super.isHidden = false
-        clipsToBounds = true
+        clipsToBounds = false
     }
 
     private func configure() {
         super.alpha = 0.01
         backgroundColor = .clear
-        clipsToBounds = true
+        clipsToBounds = false
         showsRouteButton = false
         isUserInteractionEnabled = false
         isAccessibilityElement = false

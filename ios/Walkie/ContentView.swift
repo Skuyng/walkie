@@ -21,10 +21,13 @@ struct ContentView: View {
             } else {
                 loginScreen
             }
-            hiddenVolumeSlider
             if darkMode {
                 darkOverlay
             }
+        }
+        .overlay(alignment: .topLeading) {
+            hiddenVolumeSlider
+                .padding(8)
         }
         .statusBarHidden(darkMode)
         .persistentSystemOverlays(darkMode ? .hidden : .automatic)
@@ -141,6 +144,10 @@ struct ContentView: View {
             .padding(24)
         }
         .scrollDismissesKeyboard(.interactively)
+        .overlay(alignment: .topLeading) {
+            hiddenVolumeSlider
+                .padding(8)
+        }
     }
 
     private var talkScreen: some View {
@@ -199,6 +206,10 @@ struct ContentView: View {
                 .padding(.vertical, 16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .overlay(alignment: .topLeading) {
+            hiddenVolumeSlider
+                .padding(8)
         }
     }
 
@@ -297,10 +308,7 @@ struct ContentView: View {
 
     private var hiddenVolumeSlider: some View {
         HiddenSystemVolumeView(session: session)
-            .frame(width: 80, height: 24)
-            .fixedSize()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .padding(.top, 1)
+            .frame(width: 24, height: 24)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
     }
@@ -321,6 +329,8 @@ struct ContentView: View {
                 .allowsHitTesting(false)
             #endif
             hiddenVolumeSlider
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
