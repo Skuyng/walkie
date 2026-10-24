@@ -1,0 +1,35 @@
+<!doctype html><html lang="no"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Walkie"><link rel="manifest" href="/manifest.json"><link rel="apple-touch-icon" href="/icon.png">
+<title>Walkie-Talkie</title><style>
+body{margin:0;font-family:-apple-system,sans-serif;background:#111;color:#eee;text-align:center;-webkit-user-select:none;user-select:none}
+input,button{font-size:20px;padding:12px;border-radius:10px;border:0;margin:6px;width:80%}
+#ptt{width:240px;height:240px;border-radius:50%;background:#c22;color:#fff;font-size:28px;margin:30px auto;display:block;-webkit-touch-callout:none;touch-action:none}
+#ptt.on{background:#2c2}#who{font-size:22px;min-height:30px;color:#fc0}#chat{display:none}
+</style></head><body>
+<div id="login"><h1>📻 Walkie-Talkie</h1><input id="name" placeholder="Ditt navn"><input id="room" placeholder="Kanalkode (f.eks. familie)"><button id="go">Koble til</button></div>
+<div id="chat"><h2 id="title"></h2><div id="status">Kobler til…</div><button id="ptt">Hold for å snakke</button><div id="who"></div><p id="users"></p></div>
+<script>
+const $=id=>document.getElementById(id);$('name').value=localStorage.n||'';$('room').value=localStorage.r||'';
+let ws,ctx,stream,proc,src,talking=false,playT=0,speakers=new Set();const RATE=16000;
+$('go').onclick=async()=>{const n=$('name').value.trim(),r=$('room').value.trim();if(!n||!r)return alert('Skriv navn og kanal');
+localStorage.n=n;localStorage.r=r;ctx=new (window.AudioContext||window.webkitAudioContext)();await ctx.resume();
+try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}})}catch(e){return alert('Fikk ikke tilgang til mikrofonen. Tillat mikrofon i Safari.')}
+src=ctx.createMediaStreamSource(stream);proc=ctx.createScriptProcessor(4096,1,1);const mute=ctx.createGain();mute.gain.value=0;
+src.connect(proc);proc.connect(mute);mute.connect(ctx.destination);
+proc.onaudioprocess=e=>{if(!talking||!ws||ws.readyState!==1)return;const i=e.inputBuffer.getChannelData(0),ratio=ctx.sampleRate/RATE,len=Math.floor(i.length/ratio),o=new Int16Array(len);
+for(let k=0;k<len;k++){const s=Math.max(-1,Math.min(1,i[Math.floor(k*ratio)]));o[k]=s*32767}ws.send(o.buffer)};
+$('login').style.display='none';$('chat').style.display='block';$('title').textContent='Kanal: '+r;connect(n,r)};
+function connect(n,r){ws=new WebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host);ws.binaryType='arraybuffer';
+ws.onopen=()=>{$('status').textContent='🟢 Tilkoblet';ws.send(JSON.stringify({t:'join',name:n,room:r}))};
+ws.onclose=()=>{$('status').textContent='🔴 Frakoblet – prøver igjen…';setTimeout(()=>connect(n,r),2000)};
+ws.onmessage=e=>{if(typeof e.data!=='string')return play(e.data);const m=JSON.parse(e.data);
+if(m.t=='users')$('users').textContent='I kanalen: '+m.users.join(', ');
+if(m.t=='start')speakers.add(m.name);if(m.t=='stop')speakers.delete(m.name);
+$('who').textContent=speakers.size?'🔊 '+[...speakers].join(', ')+' snakker':''}}
+function play(buf){const d=new Int16Array(buf),b=ctx.createBuffer(1,d.length,RATE),c=b.getChannelData(0);for(let k=0;k<d.length;k++)c[k]=d[k]/32768;
+const s=ctx.createBufferSource();s.buffer=b;s.connect(ctx.destination);const now=ctx.currentTime;if(playT<now)playT=now+0.1;s.start(playT);playT+=b.duration}
+function down(e){e.preventDefault();if(talking)return;ctx.resume();talking=true;$('ptt').classList.add('on');$('ptt').textContent='Snakker…';ws&&ws.readyState==1&&ws.send(JSON.stringify({t:'start'}))}
+function up(e){e.preventDefault();if(!talking)return;talking=false;$('ptt').classList.remove('on');$('ptt').textContent='Hold for å snakke';ws&&ws.readyState==1&&ws.send(JSON.stringify({t:'stop'}))}
+const p=$('ptt');p.addEventListener('touchstart',down,{passive:false});p.addEventListener('touchend',up);p.addEventListener('touchcancel',up);p.addEventListener('mousedown',down);addEventListener('mouseup',up);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&ctx)ctx.resume()});
+</script></body></html>

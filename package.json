@@ -1,0 +1,22 @@
+{
+  "name": "walkie",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "localtunnel": "^2.0.2",
+    "tunnelmole": "^2.4.0",
+    "ws": "^8.22.0"
+  }
+}
