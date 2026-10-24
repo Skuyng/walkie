@@ -25,13 +25,12 @@ struct ContentView: View {
                 darkOverlay
             }
         }
-        .overlay(alignment: .topLeading) {
-            hiddenVolumeSlider
-                .padding(8)
-        }
         .statusBarHidden(darkMode)
         .persistentSystemOverlays(darkMode ? .hidden : .automatic)
-        .onAppear { refreshVolumeButtons() }
+        .onAppear {
+            session.prepareVolumeHUD()
+            refreshVolumeButtons()
+        }
         .onDisappear {
             exitDarkMode()
             session.setVolumeButtonMonitoringEnabled(false)
@@ -39,6 +38,7 @@ struct ContentView: View {
         .onChange(of: session.name) { _, _ in session.savePreferences() }
         .onChange(of: session.room) { _, _ in session.savePreferences() }
         .onChange(of: session.serverURL) { _, _ in session.savePreferences() }
+        .onChange(of: session.speakerphone) { _, _ in session.saveSpeakerphone() }
         .onChange(of: session.linkState) { _, _ in refreshVolumeButtons() }
         .onChange(of: session.hasConnectedOnce) { _, connected in
             if !connected { exitDarkMode() }
@@ -46,7 +46,9 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
                 session.endTransmitting()
+                session.releaseIdleVolumeSession()
             } else if phase == .active {
+                session.prepareVolumeHUD()
                 session.resumeAudioIfNeeded()
             }
             syncDarkMode(with: phase)
@@ -144,10 +146,6 @@ struct ContentView: View {
             .padding(24)
         }
         .scrollDismissesKeyboard(.interactively)
-        .overlay(alignment: .topLeading) {
-            hiddenVolumeSlider
-                .padding(8)
-        }
     }
 
     private var talkScreen: some View {
@@ -189,6 +187,8 @@ struct ContentView: View {
                     volumeDebugLine()
                     #endif
 
+                    speakerphoneToggle
+
                     HStack(spacing: 16) {
                         Button(action: enterDarkMode) {
                             Label("Mørk modus", systemImage: "moon.fill")
@@ -207,10 +207,17 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .overlay(alignment: .topLeading) {
-            hiddenVolumeSlider
-                .padding(8)
+    }
+
+    private var speakerphoneToggle: some View {
+        Toggle(isOn: $session.speakerphone) {
+            Label("Høyttaler", systemImage: "speaker.wave.2.fill")
         }
+        .font(.body.weight(.medium))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .glassEffect(.regular, in: Capsule())
+        .accessibilityHint("På bruker høyttaler. Av bruker ørepluggen, unntatt når hodetelefoner er koblet til.")
     }
 
     private var speakerRow: some View {
@@ -306,13 +313,6 @@ struct ContentView: View {
     }
     #endif
 
-    private var hiddenVolumeSlider: some View {
-        HiddenSystemVolumeView(session: session)
-            .frame(width: 24, height: 24)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-    }
-
     private var darkOverlay: some View {
         ZStack {
             Color.black
@@ -328,9 +328,6 @@ struct ContentView: View {
                 .padding(.bottom, 28)
                 .allowsHitTesting(false)
             #endif
-            hiddenVolumeSlider
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
@@ -377,6 +374,9 @@ struct ContentView: View {
     }
 
     private func refreshVolumeButtons() {
+        if scenePhase == .active {
+            session.prepareVolumeHUD()
+        }
         let listen = scenePhase == .active && session.linkState == .connected
         session.setVolumeButtonMonitoringEnabled(listen)
     }

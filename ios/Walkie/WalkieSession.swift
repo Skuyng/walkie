@@ -19,6 +19,7 @@ final class WalkieSession: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var suggestsSettings = false
     @Published private(set) var hasConnectedOnce = false
+    @Published var speakerphone: Bool
     #if DEBUG
     @Published private(set) var volumeEventCount = 0
     @Published private(set) var lastVolumeEvent = Date.distantPast
@@ -56,6 +57,9 @@ final class WalkieSession: ObservableObject {
         name = storedName
         room = storedRoom
         serverURL = storedServer.isEmpty ? Self.defaultServerURL : storedServer
+        speakerphone = defaults.object(forKey: Key.speakerphone) as? Bool ?? true
+        engine.setSpeakerphone(speakerphone)
+        engine.activateForSystemVolume()
 
         transmitter.signaling = self
         transmitter.onChange = { [weak self] talking in
@@ -101,6 +105,25 @@ final class WalkieSession: ObservableObject {
         defaults.set(name, forKey: Key.name)
         defaults.set(room, forKey: Key.room)
         defaults.set(serverURL, forKey: Key.server)
+    }
+
+    func saveSpeakerphone() {
+        defaults.set(speakerphone, forKey: Key.speakerphone)
+        engine.setSpeakerphone(speakerphone)
+    }
+
+    /// Audio session plus the key-window volume slider. Safe to call again
+    /// when the scene becomes active.
+    func prepareVolumeHUD() {
+        engine.activateForSystemVolume()
+        volumeButtons.installKeyWindowVolumeSlider(session: self)
+        Task { @MainActor in
+            self.volumeButtons.installKeyWindowVolumeSlider(session: self)
+        }
+    }
+
+    func releaseIdleVolumeSession() {
+        engine.deactivateIdleSessionIfNeeded()
     }
 
     func dismissError() {
@@ -151,6 +174,7 @@ final class WalkieSession: ObservableObject {
         speakers = []
         linkState = .disconnected
         statusText = "Ikke tilkoblet"
+        prepareVolumeHUD()
     }
 
     func beginTransmitting() {
@@ -231,6 +255,7 @@ final class WalkieSession: ObservableObject {
         guard shouldReconnect, !Task.isCancelled else {
             engine.stop()
             audioReady = false
+            prepareVolumeHUD()
             return
         }
         audioReady = true
@@ -252,6 +277,7 @@ final class WalkieSession: ObservableObject {
         statusText = "Ikke tilkoblet"
         suggestsSettings = settings
         errorMessage = message
+        prepareVolumeHUD()
     }
 
     private func handleOpen() {
@@ -342,6 +368,7 @@ final class WalkieSession: ObservableObject {
         static let name = "walkie.name"
         static let room = "walkie.room"
         static let server = "walkie.serverURL"
+        static let speakerphone = "walkie.speakerphone"
     }
 }
 

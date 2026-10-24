@@ -21,10 +21,12 @@ enum VoiceEngineError: LocalizedError, Equatable {
 
 /// Captures the microphone and plays incoming PCM16 while the session stays active.
 ///
-/// `playAndRecord` + `defaultToSpeaker` + `allowBluetoothHFP` (the current name of
-/// `allowBluetooth`) keeps the speakerphone route. The input tap stays installed
-/// for the whole connection so iOS treats the app as an active audio app when the
-/// phone is locked. Samples are only sent upstream while the microphone flag is open.
+/// `playAndRecord` + `allowBluetoothHFP` (the current name of `allowBluetooth`)
+/// keeps a call route. Høyttaler adds `defaultToSpeaker` and a speaker override;
+/// off uses the receiver unless a headset is connected. The input tap stays
+/// installed for the whole connection so iOS treats the app as an active audio
+/// app when the phone is locked. Samples are only sent upstream while the
+/// microphone flag is open. Switching the speaker does not rebuild the engine.
 final class VoiceEngine {
     var onFailure: ((String) -> Void)?
     var onInterrupted: (() -> Void)?
@@ -39,6 +41,10 @@ final class VoiceEngine {
     private var capture: ((Data) -> Void)?
 
     private var engine: AVAudioEngine?
+    private var useSpeaker = true
+    /// True while startup or the live engine owns the session, so the idle
+    /// volume-HUD activation cannot swap the category underneath a call.
+    private var engineOwnsSession = false
     private var voicePlayer: AVAudioPlayerNode?
     private var beepPlayer: AVAudioPlayerNode?
     private var playbackFormat: AVAudioFormat?
@@ -105,6 +111,48 @@ final class VoiceEngine {
     /// iOS post volume events and looks like another button press.
     func setMicrophoneOpen(_ open: Bool) {
         micOpen.withLock { $0 = open }
+    }
+
+    func setSpeakerphone(_ enabled: Bool) {
+        let apply = { [weak self] in
+            guard let self else { return }
+            self.useSpeaker = enabled
+            guard AVAudioSession.sharedInstance().category == .playAndRecord else { return }
+            self.applyOutputRoute(force: true)
+            self.ensureRunning()
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
+    }
+
+    /// Active session before the engine starts, so a volume press can hide the
+    /// system HUD. Playback avoids the microphone prompt; the call session
+    /// replaces it once audio actually starts.
+    func activateForSystemVolume() {
+        let apply = { [weak self] in
+            self?.activateIdleSessionOnMain()
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
+    }
+
+    /// Drops the launch session when the app backgrounds, without touching a live call.
+    func deactivateIdleSessionIfNeeded() {
+        let apply = { [weak self] in
+            guard let self, self.engineOwnsSession == false else { return }
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
     }
 
     func start() throws {
@@ -183,8 +231,12 @@ final class VoiceEngine {
         try requireMicrophonePermission()
         if !force {
             let running = queue.sync { shouldRun && engine?.isRunning == true }
-            if running { return }
+            if running {
+                engineOwnsSession = true
+                return
+            }
         }
+        engineOwnsSession = true
 
         var lastError: Error = VoiceEngineError.failedToStart
         var retriedZeroFormat = false
@@ -235,6 +287,7 @@ final class VoiceEngine {
 
     private func deactivateSession() {
         let deactivate = {
+            self.engineOwnsSession = false
             try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         }
         if Thread.isMainThread {
@@ -269,8 +322,9 @@ final class VoiceEngine {
         try session.setCategory(
             .playAndRecord,
             mode: voiceChat ? .voiceChat : .default,
-            options: [.defaultToSpeaker, .allowBluetoothHFP]
+            options: categoryOptions()
         )
+        engineOwnsSession = true
         if preferWireRate {
             try? session.setPreferredSampleRate(PCM16.sampleRate)
         }
@@ -278,6 +332,27 @@ final class VoiceEngine {
         try session.setActive(true)
         applyOutputRoute()
         reportSessionReconfigured()
+    }
+
+    private func activateIdleSessionOnMain() {
+        if engineOwnsSession { return }
+        let session = AVAudioSession.sharedInstance()
+        do {
+            if session.category != .playback {
+                try session.setCategory(.playback, mode: .default, options: [])
+            }
+            try session.setActive(true)
+        } catch {
+            log.error("Volume session failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func categoryOptions() -> AVAudioSession.CategoryOptions {
+        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP]
+        if useSpeaker {
+            options.insert(.defaultToSpeaker)
+        }
+        return options
     }
 
     private func buildAndStart() throws {
@@ -531,18 +606,40 @@ final class VoiceEngine {
         return copy
     }
 
-    private func applyOutputRoute() {
+    @discardableResult
+    private func applyOutputRoute(force: Bool = false) -> Bool {
         let session = AVAudioSession.sharedInstance()
         let hasExternal = session.currentRoute.outputs.contains { Self.externalPorts.contains($0.portType) }
-        let desired: AVAudioSession.PortOverride = hasExternal ? .none : .speaker
-        guard lastOverride != desired else { return }
-        do {
-            try session.overrideOutputAudioPort(desired)
-            lastOverride = desired
-            reportSessionReconfigured()
-        } catch {
-            log.error("Output route failed: \(error.localizedDescription, privacy: .public)")
+        let desired: AVAudioSession.PortOverride = (hasExternal || !useSpeaker) ? .none : .speaker
+        var changed = false
+        if outputOptionsNeedUpdate(session) {
+            do {
+                try session.setCategory(.playAndRecord, mode: session.mode, options: categoryOptions())
+                changed = true
+            } catch {
+                log.error("Output options failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
+        if force || lastOverride != desired {
+            do {
+                try session.overrideOutputAudioPort(desired)
+                lastOverride = desired
+                changed = true
+            } catch {
+                log.error("Output route failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        if changed {
+            reportSessionReconfigured()
+        }
+        return changed
+    }
+
+    private func outputOptionsNeedUpdate(_ session: AVAudioSession) -> Bool {
+        if session.category != .playAndRecord { return true }
+        let options = session.categoryOptions
+        if options.contains(.allowBluetoothHFP) == false { return true }
+        return options.contains(.defaultToSpeaker) != useSpeaker
     }
 
     private func handleInterruption(_ note: Notification) {
@@ -564,8 +661,12 @@ final class VoiceEngine {
     }
 
     private func handleRouteChange(_ note: Notification) {
+        let reasonValue = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+        let overridden = reasonValue == AVAudioSession.RouteChangeReason.override.rawValue
+        let categoryChanged = reasonValue == AVAudioSession.RouteChangeReason.categoryChange.rawValue
         queue.async { [weak self] in
             guard let self, self.shouldRun else { return }
+            if overridden || categoryChanged { return }
             let rate = AVAudioSession.sharedInstance().sampleRate
             let current = self.playbackFormat?.sampleRate ?? 0
             if current > 0, rate > 0, abs(rate - current) > 1 {

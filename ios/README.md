@@ -33,7 +33,8 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Kanalkode** — felles kode, for eksempel `familie`. Store og små bokstaver er samme kanal (maks 40 tegn).
 - **Server** — `wss://walkie-bc0z.onrender.com` som standard. `https://` gjøres om til `wss://`, og `http://` til `ws://`. Tomt felt bruker standardadressen.
 - **Hold for å snakke** — lyd sendes bare mens knappen holdes inne.
-- **Volum opp** — hold inne for å snakke, og slipp for å stoppe, mens appen er tilkoblet og i forgrunnen. Lydnivået settes tilbake etter at du slipper. Volumvisningen fra systemet vises ikke, heller ikke i mørk modus.
+- **Volum opp** — hold inne for å snakke, og slipp for å stoppe, mens appen er tilkoblet og i forgrunnen. Lydnivået settes tilbake etter at du slipper. Systemets volumvisning skjules i vanlig visning og i mørk modus.
+- **Høyttaler** — på som standard. På sender lyden i høyttaleren. Av bruker ørepluggen, med mindre hodetelefoner eller Bluetooth er koblet til. Valget lagres på telefonen.
 - **Mørk modus** — svart skjerm, lav lysstyrke, og telefonen holder seg våken. Et svakt rødt punkt vises mens du sender. Trykk skjermen for å avslutte. Volum opp virker her også.
 - Når noen andre begynner eller slutter å snakke, spilles en kort tone, og navnet vises.
 
@@ -54,7 +55,7 @@ Nettleseren plukker nærmeste sample når den nedsampler. iOS bruker `AVAudioCon
 
 ## Bakgrunn og låst skjerm
 
-`Info.plist` har `UIBackgroundModes` satt til `audio`. Lydøkten er `playAndRecord`, med `defaultToSpeaker` og Bluetooth-headset (`allowBluetoothHFP`, dagens navn på `allowBluetooth`). Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle, slik at innkommende tale kan fortsette når skjermen er låst.
+`Info.plist` har `UIBackgroundModes` satt til `audio`. Lydøkten er `playAndRecord`, med Bluetooth-headset (`allowBluetoothHFP`, dagens navn på `allowBluetooth`). **Høyttaler** på legger til `defaultToSpeaker` og tvinger høyttaler. Av lar lyden gå i ørepluggen når det ikke er et hodesett. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle, slik at innkommende tale kan fortsette når skjermen er låst.
 
 Den oransje mikrofonprikken lyser mens du er tilkoblet, fordi appen holder lydøkten i gang for å kunne ta imot tale i bakgrunnen. Du sender ikke lyd før du holder knappen inne, eller holder volum opp inne.
 
