@@ -19,6 +19,10 @@ final class WalkieSession: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var suggestsSettings = false
     @Published private(set) var hasConnectedOnce = false
+    #if DEBUG
+    @Published private(set) var volumeEventCount = 0
+    @Published private(set) var lastVolumeEvent = Date.distantPast
+    #endif
 
     var canTransmit: Bool {
         linkState == .connected && audioReady
@@ -153,6 +157,7 @@ final class WalkieSession: ObservableObject {
         transmitter.beginTransmitting()
     }
 
+    /// Stops sending. Does not change the audio session category or mode.
     func endTransmitting() {
         transmitter.endTransmitting()
     }
@@ -169,8 +174,17 @@ final class WalkieSession: ObservableObject {
                     self.endTransmitting()
                 }
             }
+            #if DEBUG
+            volumeButtons.onVolumeEvent = { [weak self] in
+                self?.recordVolumeEvent()
+            }
+            #endif
         } else {
             volumeButtons.stop()
+            #if DEBUG
+            volumeEventCount = 0
+            lastVolumeEvent = .distantPast
+            #endif
         }
     }
 
@@ -181,6 +195,13 @@ final class WalkieSession: ObservableObject {
     func detachSystemVolumeView(_ view: MPVolumeView) {
         volumeButtons.detach(view)
     }
+
+    #if DEBUG
+    private func recordVolumeEvent() {
+        volumeEventCount += 1
+        lastVolumeEvent = Date()
+    }
+    #endif
 
     func resumeAudioIfNeeded() {
         guard shouldReconnect else { return }

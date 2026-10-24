@@ -178,6 +178,10 @@ struct ContentView: View {
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.secondary)
 
+                    #if DEBUG
+                    volumeDebugLine()
+                    #endif
+
                     HStack(spacing: 16) {
                         Button(action: enterDarkMode) {
                             Label("Mørk modus", systemImage: "moon.fill")
@@ -270,6 +274,23 @@ struct ContentView: View {
         }
     }
 
+    #if DEBUG
+    private func volumeDebugLine(onDark: Bool = false) -> some View {
+        TimelineView(.periodic(from: .now, by: 0.1)) { timeline in
+            let elapsed: String
+            if session.volumeEventCount == 0 {
+                elapsed = "—"
+            } else {
+                let ms = Int(timeline.date.timeIntervalSince(session.lastVolumeEvent) * 1000)
+                elapsed = "\(max(0, ms))"
+            }
+            Text("vol \(elapsed) ms · \(session.volumeEventCount)")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(onDark ? Color.white.opacity(0.55) : Color.secondary)
+        }
+    }
+    #endif
+
     private var hiddenVolumeSlider: some View {
         HiddenSystemVolumeView(session: session)
             .frame(width: 80, height: 24)
@@ -289,6 +310,12 @@ struct ContentView: View {
                     .frame(width: 8, height: 8)
                     .accessibilityHidden(true)
             }
+            #if DEBUG
+            volumeDebugLine(onDark: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, 28)
+                .allowsHitTesting(false)
+            #endif
             hiddenVolumeSlider
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

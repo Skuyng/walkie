@@ -6,11 +6,11 @@ import SwiftUI
 
 /// Volume-up is hold-to-talk while the app is connected and in the foreground.
 ///
-/// The first explicit step up starts transmitting. iOS then auto-repeats the
-/// button (after a short pause, then about every 100–250 ms). Each repeat
-/// extends the hold, including when the level is already at the top. If the
-/// repeats stop, transmitting stops. The level is parked back to the middle
-/// only once it reaches the top, and events caused by that write are ignored.
+/// The first explicit step up starts transmitting. Further volume-up events,
+/// including repeats at the top of the scale, keep the hold alive. Transmitting
+/// stops only after 1.2 s with no volume-up event (1.5 s after the first one).
+/// The level is parked back to the middle after the hold ends, never during it,
+/// and events caused by that write are ignored.
 ///
 /// `MPVolumeView` has to sit on-screen inside the active view (including Mørk
 /// modus) or iOS draws the system volume HUD. The view is hosted by SwiftUI.
@@ -20,13 +20,12 @@ import SwiftUI
 final class VolumeButtonMonitor {
     static let parkLevel: Float = 0.5
     private static let stepEpsilon: Float = 0.01
-    private static let parkTrigger: Float = 0.9
     private static let parkArrived: Float = 0.02
     private static let ceiling: Float = 0.98
-    /// First press, before iOS starts auto-repeat (~500 ms later).
-    private static let initialGrace: TimeInterval = 0.70
-    /// Gap allowed between auto-repeat events.
-    private static let repeatGrace: TimeInterval = 0.40
+    /// First press. iOS waits before it starts auto-repeat.
+    private static let initialGrace: TimeInterval = 1.5
+    /// Stay up until this long passes with no further volume-up event.
+    private static let repeatGrace: TimeInterval = 1.2
     private static let resetTimeout: TimeInterval = 1.5
     private static let sessionIgnore: TimeInterval = 0.80
 
@@ -42,20 +41,19 @@ final class VolumeButtonMonitor {
     private var lastVolume: Float = 0.5
     private var releaseAt = Date.distantPast
     private var sessionIgnoreUntil = Date.distantPast
-    /// Readings still at the pre-park level, just after we have landed at 0.5.
-    private var suppressHighUntil = Date.distantPast
+    /// Blocks a new hold while the post-release park write is still echoing.
+    private var parkEchoUntil = Date.distantPast
     private var notificationTokens: [NSObjectProtocol] = []
+    #if DEBUG
+    var onVolumeEvent: (@MainActor () -> Void)?
+    #endif
     private var holdToken = 0
     private var resetGeneration = 0
+    private var stoppingHold = false
     private var loggedMissingSlider = false
 
     func attach(_ view: MPVolumeView) {
-        let already = volumeViews.allObjects.contains { $0 === view }
         volumeViews.add(view)
-        guard enabled, ready, !already, !resetting else { return }
-        let current = AVAudioSession.sharedInstance().outputVolume
-        guard current >= Self.parkTrigger else { return }
-        beginPark()
     }
 
     func detach(_ view: MPVolumeView) {
@@ -71,10 +69,9 @@ final class VolumeButtonMonitor {
         let current = AVAudioSession.sharedInstance().outputVolume
         savedVolume = current
         lastVolume = current
+        resetting = false
+        resetGeneration += 1
         ready = true
-        if current >= Self.parkTrigger {
-            beginPark()
-        }
     }
 
     /// Audio-session category, mode, or route changes can post volume
@@ -87,15 +84,17 @@ final class VolumeButtonMonitor {
         guard enabled || savedVolume != nil || holding else { return }
         enabled = false
         ready = false
-        resetting = false
+        resetting = true
         resetGeneration += 1
         holdToken += 1
         releaseAt = .distantPast
-        if holding {
-            holding = false
-            onHold?(false)
-        }
+        let ended = holding
+        holding = false
+        let callback = onHold
         onHold = nil
+        if ended {
+            callback?(false)
+        }
         stopObservers()
         if let savedVolume {
             writeVolume(savedVolume)
@@ -146,18 +145,17 @@ final class VolumeButtonMonitor {
     /// starts a hold; later repeats keep it alive. Parking is not a press.
     private func handleVolumeNotification(reason: String, volume: Float?) {
         guard enabled, ready else { return }
+        #if DEBUG
+        onVolumeEvent?()
+        #endif
         let value = volume ?? AVAudioSession.sharedInstance().outputVolume
         let previous = lastVolume
         lastVolume = value
 
-        if resetting {
-            if abs(value - Self.parkLevel) < Self.parkArrived {
+        if resetting || stoppingHold {
+            if !stoppingHold, abs(value - Self.parkLevel) < Self.parkArrived {
                 resetting = false
-                suppressHighUntil = Date().addingTimeInterval(Self.repeatGrace)
             }
-            return
-        }
-        if value >= Self.parkTrigger, Date() < suppressHighUntil {
             return
         }
         let sessionEcho = Date() < sessionIgnoreUntil
@@ -177,11 +175,10 @@ final class VolumeButtonMonitor {
             if !decreased {
                 armRelease(after: Self.repeatGrace)
             }
+        } else if Date() < parkEchoUntil {
+            return
         } else if increased || value >= Self.ceiling {
             beginHold()
-        }
-        if value >= Self.parkTrigger {
-            beginPark()
         }
     }
 
@@ -195,12 +192,17 @@ final class VolumeButtonMonitor {
     }
 
     private func endHold() {
-        guard holding else { return }
+        guard holding, !stoppingHold else { return }
+        stoppingHold = true
         holding = false
         holdToken += 1
         releaseAt = .distantPast
         log.info("Volume released")
+        // Park only after release. Ignore that write, and anything stopping
+        // talk posts, so neither can start another hold.
+        beginPark()
         onHold?(false)
+        stoppingHold = false
     }
 
     /// Moves the release deadline later. A duplicate of the first press must
@@ -219,14 +221,11 @@ final class VolumeButtonMonitor {
         }
     }
 
-    /// Parks only near the top of the scale, so a hold can keep repeating.
-    /// The write's own notifications are ignored until the level is back in
-    /// the middle, or until the timeout.
+    /// Parks after the hold has ended. Writing during the hold stops iOS from
+    /// repeating the button. The write's own notifications cannot start a hold.
     private func beginPark() {
         guard enabled, !resetting else { return }
-        if holding {
-            armRelease(after: Self.initialGrace)
-        }
+        parkEchoUntil = Date().addingTimeInterval(Self.resetTimeout)
         resetting = true
         resetGeneration += 1
         let generation = resetGeneration
