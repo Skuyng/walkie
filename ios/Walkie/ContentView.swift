@@ -275,16 +275,20 @@ struct ContentView: View {
     }
 
     #if DEBUG
+    private func volumeDebugText(at date: Date) -> String {
+        let elapsed: String
+        if session.volumeEventCount == 0 {
+            elapsed = "—"
+        } else {
+            let ms = Int(date.timeIntervalSince(session.lastVolumeEvent) * 1000)
+            elapsed = "\(max(0, ms))"
+        }
+        return "vol \(elapsed) ms · \(session.volumeEventCount)"
+    }
+
     private func volumeDebugLine(onDark: Bool = false) -> some View {
         TimelineView(.periodic(from: .now, by: 0.1)) { timeline in
-            let elapsed: String
-            if session.volumeEventCount == 0 {
-                elapsed = "—"
-            } else {
-                let ms = Int(timeline.date.timeIntervalSince(session.lastVolumeEvent) * 1000)
-                elapsed = "\(max(0, ms))"
-            }
-            Text("vol \(elapsed) ms · \(session.volumeEventCount)")
+            Text(volumeDebugText(at: timeline.date))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(onDark ? Color.white.opacity(0.55) : Color.secondary)
         }
