@@ -30,7 +30,7 @@ final class WalkieSession: ObservableObject {
 
     var speakerLine: String {
         if speakers.isEmpty { return "" }
-        return "🔊 " + speakers.joined(separator: ", ") + " snakker"
+        return speakers.joined(separator: ", ") + " snakker"
     }
 
     private let defaults = UserDefaults.standard
@@ -226,7 +226,7 @@ final class WalkieSession: ObservableObject {
     private func handleOpen() {
         hasConnectedOnce = true
         linkState = .connected
-        statusText = "🟢 Tilkoblet"
+        statusText = "Tilkoblet"
         socket.sendJoin(name: name, room: room)
     }
 
@@ -240,7 +240,7 @@ final class WalkieSession: ObservableObject {
         endTransmitting()
         guard shouldReconnect else { return }
         linkState = .reconnecting
-        statusText = "🔴 Frakoblet – prøver igjen…"
+        statusText = "Frakoblet – prøver igjen…"
         scheduleReconnect()
     }
 

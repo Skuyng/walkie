@@ -4,11 +4,11 @@ Walkie er en enkel walkie-talkie. Appen kobler seg til den samme serveren som ne
 
 Standard server er `wss://walkie-bc0z.onrender.com`. Adressen kan endres i appen. Navn, kanalkode og server lagres på telefonen (UserDefaults).
 
-Prosjektet er SwiftUI, iOS 17 eller nyere, og har ingen tredjepartspakker. `Walkie.xcodeproj` er sjekket inn, så du trenger ikke XcodeGen for å bygge.
+Prosjektet er SwiftUI, iOS 26 eller nyere, og har ingen tredjepartspakker. `Walkie.xcodeproj` er sjekket inn, så du trenger ikke XcodeGen for å bygge.
 
 ## Installer på iPhone med gratis Apple-ID
 
-Du trenger en Mac med Xcode 26 og en iPhone med iOS 17 eller nyere. En betalt utviklerkonto trengs ikke.
+Du trenger en Mac med Xcode 26 og en iPhone med iOS 26 eller nyere. En betalt utviklerkonto trengs ikke.
 
 1. Installer Xcode 26 fra Mac App Store. Åpne Xcode én gang og la det installere ekstra komponenter.
 2. Koble iPhone til Mac med kabel. Lås opp telefonen og trykk **Stol på** hvis Mac spør.
@@ -74,7 +74,7 @@ cd ios
 xcodegen generate
 ```
 
-`project.yml` setter bundle-id `com.skuyng.walkie`, visningsnavn Walkie, iOS 17 og tom `DEVELOPMENT_TEAM`. Språkmodus er Swift 5, slik at Xcode 26 ikke skrur på Swift 6-sjekkene som standard.
+`project.yml` setter bundle-id `com.skuyng.walkie`, visningsnavn Walkie, iOS 26 og tom `DEVELOPMENT_TEAM`. Språkmodus er Swift 5, slik at Xcode 26 ikke skrur på Swift 6-sjekkene som standard.
 
 ## Begrensninger
 
