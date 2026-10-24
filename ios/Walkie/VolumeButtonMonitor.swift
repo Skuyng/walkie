@@ -2,6 +2,7 @@ import AVFoundation
 import MediaPlayer
 import os
 import UIKit
+import SwiftUI
 
 /// Volume-up toggles talk while the app is connected and in the foreground.
 ///
@@ -323,6 +324,7 @@ private final class WriteGate: @unchecked Sendable {
 
 /// On-screen volume slider. Alpha stays just above zero so iOS suppresses the
 /// system HUD, including over the black Mørk modus overlay.
+@MainActor
 struct HiddenSystemVolumeView: UIViewRepresentable {
     let session: WalkieSession
 
