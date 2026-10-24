@@ -32,12 +32,17 @@ targets:
       - path: Walkie
         excludes:
           - Info.plist
+          - Assets.xcassets
+          - Assets.xcassets/**
+      - path: Walkie/Assets.xcassets
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.skuyng.walkie
         PRODUCT_NAME: Walkie
         INFOPLIST_FILE: Walkie/Info.plist
         GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
         MARKETING_VERSION: "1.0"

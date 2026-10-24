@@ -16,6 +16,7 @@
 		A10000000000000000000007 /* TalkTransmitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* TalkTransmitter.swift */; };
 		A10000000000000000000008 /* VolumeButtonMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* VolumeButtonMonitor.swift */; };
 		A10000000000000000000009 /* MediaPlayer.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* MediaPlayer.framework */; };
+		A1000000000000000000000B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +30,7 @@
 		A20000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A20000000000000000000009 /* VolumeButtonMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeButtonMonitor.swift; sourceTree = "<group>"; };
 		A2000000000000000000000A /* MediaPlayer.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MediaPlayer.framework; path = System/Library/Frameworks/MediaPlayer.framework; sourceTree = SDKROOT; };
+		A2000000000000000000000B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A30000000000000000000001 /* Walkie.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Walkie.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -64,6 +66,7 @@
 				A20000000000000000000006 /* PCM16.swift */,
 				A20000000000000000000007 /* TalkTransmitter.swift */,
 				A20000000000000000000009 /* VolumeButtonMonitor.swift */,
+				A2000000000000000000000B /* Assets.xcassets */,
 				A20000000000000000000008 /* Info.plist */,
 			);
 			path = Walkie;
@@ -145,6 +148,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1000000000000000000000B /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -227,6 +231,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -257,6 +262,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
