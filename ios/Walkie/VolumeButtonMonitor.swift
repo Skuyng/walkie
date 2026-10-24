@@ -11,11 +11,10 @@ import UIKit
 /// The level is parked back to the middle after the hold ends, never during it,
 /// and events caused by that write are ignored.
 ///
-/// The system volume HUD stays hidden only when one `MPVolumeView` is in the
-/// key window's visible hierarchy and the audio session is active. That slider
-/// is on-screen at alpha 0.0001 on every screen, including Mørk modus. The
-/// unpublished volume notification is the only press source. This target is
-/// sideloaded, not shipped through the App Store.
+/// The system volume HUD stays hidden when one opaque `MPVolumeView` sits
+/// behind the rest of the key window. The unpublished volume notification is
+/// the only press source. This target is sideloaded, not shipped through the
+/// App Store.
 @MainActor
 final class VolumeButtonMonitor {
     static let parkLevel: Float = 0.5
@@ -295,21 +294,24 @@ final class VolumeButtonMonitor {
     }
 }
 
-/// One `MPVolumeView` added straight to the key window when the scene activates.
-/// SwiftUI copies are not used. The slider stays on-screen, not hidden, with the
-/// volume track enabled and alpha just above zero.
+/// One opaque `MPVolumeView` behind the SwiftUI host. Added only once the
+/// window is key, and inserted again if UIKit drops it.
 @MainActor
 private enum SystemVolumeHUDSuppressor {
     private static let log = Logger(subsystem: "com.skuyng.walkie", category: "volume")
     private static var anchor: MPVolumeView?
-    private static let onScreenFrame = CGRect(x: 10, y: 10, width: 100, height: 30)
+    private static weak var attachedSession: WalkieSession?
+    private static var activationObserver: NSObjectProtocol?
+    private static let onScreenFrame = CGRect(x: 0, y: 0, width: 120, height: 30)
 
     static func install(session: WalkieSession) {
+        attachedSession = session
+        observeActivation()
         guard let window = keyWindow() else { return }
         let created = anchor?.superview !== window
         let view = reusedView(in: window)
         view.frame = onScreenFrame
-        view.alpha = 0.0001
+        view.alpha = 1
         view.isHidden = false
         view.clipsToBounds = false
         view.backgroundColor = .clear
@@ -318,12 +320,29 @@ private enum SystemVolumeHUDSuppressor {
         view.isUserInteractionEnabled = false
         view.isAccessibilityElement = false
         view.accessibilityElementsHidden = true
-        window.addSubview(view)
+        window.insertSubview(view, at: 0)
         view.layoutIfNeeded()
         session.attachSystemVolumeView(view)
         if created {
-            log.info("Volume view is in the key window")
+            log.info("Volume view is behind the key window content")
         }
+    }
+
+    private static func observeActivation() {
+        if activationObserver != nil { return }
+        let handler: @Sendable (Notification) -> Void = { _ in
+            let hop: @MainActor () -> Void = {
+                guard let attachedSession else { return }
+                install(session: attachedSession)
+            }
+            MainActor.assumeIsolated(hop)
+        }
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main,
+            using: handler
+        )
     }
 
     private static func reusedView(in window: UIWindow) -> MPVolumeView {
@@ -338,10 +357,10 @@ private enum SystemVolumeHUDSuppressor {
 
     private static func keyWindow() -> UIWindow? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-        if let key = scene?.keyWindow {
+        let scene = scenes.first { $0.activationState == .foregroundActive }
+        if let key = scene?.keyWindow, key.isKeyWindow {
             return key
         }
-        return scene?.windows.first { $0.isKeyWindow } ?? scene?.windows.first
+        return scene?.windows.first { $0.isKeyWindow }
     }
 }
