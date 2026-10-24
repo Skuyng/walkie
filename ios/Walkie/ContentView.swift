@@ -21,6 +21,7 @@ struct ContentView: View {
             } else {
                 loginScreen
             }
+            hiddenVolumeSlider
             if darkMode {
                 darkOverlay
             }
@@ -269,6 +270,16 @@ struct ContentView: View {
         }
     }
 
+    private var hiddenVolumeSlider: some View {
+        HiddenSystemVolumeView(session: session)
+            .frame(width: 80, height: 24)
+            .fixedSize()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.top, 1)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
     private var darkOverlay: some View {
         ZStack {
             Color.black
@@ -278,6 +289,7 @@ struct ContentView: View {
                     .frame(width: 8, height: 8)
                     .accessibilityHidden(true)
             }
+            hiddenVolumeSlider
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()

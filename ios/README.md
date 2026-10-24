@@ -33,7 +33,7 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Kanalkode** — felles kode, for eksempel `familie`. Store og små bokstaver er samme kanal (maks 40 tegn).
 - **Server** — `wss://walkie-bc0z.onrender.com` som standard. `https://` gjøres om til `wss://`, og `http://` til `ws://`. Tomt felt bruker standardadressen.
 - **Hold for å snakke** — lyd sendes bare mens knappen holdes inne.
-- **Volum opp** — starter sending første gang og stopper den neste, mens appen er tilkoblet og i forgrunnen. Lydnivået settes tilbake, så knappen kan brukes igjen. Volum ned endrer lydnivået som vanlig. Volumvisningen fra systemet er skjult mens dette er aktivt.
+- **Volum opp** — starter sending første gang og stopper den neste, mens appen er tilkoblet og i forgrunnen. Lydnivået holdes midt på skalaen mens du er tilkoblet, så knappen virker hver gang. Volumvisningen fra systemet vises ikke, heller ikke i mørk modus.
 - **Mørk modus** — svart skjerm, lav lysstyrke, og telefonen holder seg våken. Et svakt rødt punkt vises mens du sender. Trykk skjermen for å avslutte. Volum opp virker her også.
 - Når noen andre begynner eller slutter å snakke, spilles en kort tone, og navnet vises.
 

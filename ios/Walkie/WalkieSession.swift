@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import MediaPlayer
 
 @MainActor
 final class WalkieSession: ObservableObject {
@@ -161,6 +162,14 @@ final class WalkieSession: ObservableObject {
         } else {
             volumeButtons.stop()
         }
+    }
+
+    func attachSystemVolumeView(_ view: MPVolumeView) {
+        volumeButtons.attach(view)
+    }
+
+    func detachSystemVolumeView(_ view: MPVolumeView) {
+        volumeButtons.detach(view)
     }
 
     private func toggleFromVolumeButton() {
