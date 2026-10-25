@@ -15,40 +15,79 @@ enum ChannelCode {
     }
 }
 
-/// Generators stay prepared so the first click is not late.
-@MainActor
-enum WalkieHaptics {
-    private static let press = UIImpactFeedbackGenerator(style: .heavy)
-    private static let release = UIImpactFeedbackGenerator(style: .soft)
-    private static let remoteStart = UINotificationFeedbackGenerator()
-    private static let remoteStop = UIImpactFeedbackGenerator(style: .light)
+/// Strong generators, created on the main thread with the session.
+/// `playAndRecord` silences haptics unless the audio session allows them.
+final class WalkieHaptics {
+    private let press: UIImpactFeedbackGenerator
+    private let release: UIImpactFeedbackGenerator
+    private let remoteStart: UINotificationFeedbackGenerator
+    private let remoteStop: UIImpactFeedbackGenerator
 
-    static func prepare() {
+    init() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        press = UIImpactFeedbackGenerator(style: .heavy)
+        release = UIImpactFeedbackGenerator(style: .soft)
+        remoteStart = UINotificationFeedbackGenerator()
+        remoteStop = UIImpactFeedbackGenerator(style: .light)
+        prepareNow()
+    }
+
+    func prepare() {
+        onMain { self.prepareNow() }
+    }
+
+    func pressTalk() {
+        onMain { self.firePress() }
+    }
+
+    func releaseTalk() {
+        onMain { self.fireRelease() }
+    }
+
+    func remoteStarted() {
+        onMain { self.fireRemoteStart() }
+    }
+
+    func remoteStopped() {
+        onMain { self.fireRemoteStop() }
+    }
+
+    /// Volume-up and the on-screen press both land here. Fire immediately on
+    /// the main thread; hop if a caller is not already there.
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    private func prepareNow() {
         press.prepare()
         release.prepare()
         remoteStart.prepare()
         remoteStop.prepare()
     }
 
-    static func pressTalk() {
+    private func firePress() {
         press.impactOccurred()
         press.prepare()
         release.prepare()
     }
 
-    static func releaseTalk() {
+    private func fireRelease() {
         release.impactOccurred(intensity: 0.65)
         release.prepare()
         press.prepare()
     }
 
-    static func remoteStarted() {
+    private func fireRemoteStart() {
         remoteStart.notificationOccurred(.success)
         remoteStart.prepare()
         remoteStop.prepare()
     }
 
-    static func remoteStopped() {
+    private func fireRemoteStop() {
         remoteStop.impactOccurred(intensity: 0.35)
         remoteStop.prepare()
     }

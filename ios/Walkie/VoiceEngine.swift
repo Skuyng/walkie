@@ -334,6 +334,7 @@ final class VoiceEngine {
             options: categoryOptions()
         )
         engineOwnsSession = true
+        try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
         try? session.setPreferredIOBufferDuration(0.04)
         try session.setActive(true)
         applyOutputRoute()
@@ -652,6 +653,7 @@ final class VoiceEngine {
             do {
                 try session.setCategory(.playAndRecord, mode: session.mode, options: categoryOptions())
                 changed = true
+                try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
             } catch {
                 log.error("Output options failed: \(error.localizedDescription, privacy: .public)")
             }

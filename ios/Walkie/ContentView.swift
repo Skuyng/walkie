@@ -33,12 +33,12 @@ struct ContentView: View {
         .tint(Aurora.teal)
         .task {
             while !Task.isCancelled {
-                WalkieHaptics.prepare()
+                session.haptics.prepare()
                 try? await Task.sleep(for: .seconds(1.5))
             }
         }
         .onAppear {
-            WalkieHaptics.prepare()
+            session.haptics.prepare()
             session.prepareVolumeHUD()
             refreshVolumeButtons()
         }
@@ -202,16 +202,20 @@ struct ContentView: View {
             Image(systemName: "speaker.wave.2.fill")
                 .symbolEffect(.variableColor.iterative, isActive: !session.speakerLine.isEmpty)
             Text(session.speakerLine.isEmpty ? " " : session.speakerLine)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
                 .multilineTextAlignment(.center)
         }
         .font(.system(.title3, design: .monospaced).weight(.semibold))
         .foregroundStyle(Aurora.teal)
+        .frame(maxWidth: .infinity)
+        .frame(height: 32)
         .opacity(session.speakerLine.isEmpty ? 0 : 1)
         .accessibilityHidden(session.speakerLine.isEmpty)
     }
 
     private func talkButton(side: CGFloat) -> some View {
-        TalkButton(session: session, side: side, mode: radioMode)
+        TalkButton(session: session, side: side)
     }
 
     private var auroraLive: Bool {
@@ -326,70 +330,90 @@ struct ContentView: View {
     }
 }
 
+private final class TalkActions {
+    var begin: () -> Void = {}
+    var end: () -> Void = {}
+}
+
 private struct TalkButton: View {
     @ObservedObject var session: WalkieSession
     var side: CGFloat
-    var mode: String
+    @State private var actions = TalkActions()
 
     var body: some View {
-        ZStack {
-            AuroraRings(pulsing: session.isTalking)
-                .frame(width: side, height: side)
-            TalkButtonFace(side: side, talking: session.isTalking, mode: mode)
-        }
-        .opacity(session.canTransmit ? 1 : 0.45)
-        .scaleEffect(session.isTalking ? 0.94 : 1)
-        .animation(.spring(response: 0.22, dampingFraction: 0.72), value: session.isTalking)
-        .contentShape(Circle())
-        .highPriorityGesture(press)
-        .allowsHitTesting(session.canTransmit)
-        .accessibilityElement(children: .ignore)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(session.isTalking ? "Snakker" : "Hold for å snakke")
-        .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe. Hold volum opp inne for å snakke.")
-        .accessibilityAction {
-            if session.isTalking {
-                session.endTransmitting()
-            } else {
-                session.beginTransmitting()
+        TalkPressTarget(side: side, enabled: session.canTransmit, actions: actions)
+            .equatable()
+            .overlay(TalkButtonFace(side: side, pressed: session.isTalking).allowsHitTesting(false))
+            .overlay(
+                AuroraRings(pulsing: session.isTalking)
+                    .frame(width: side, height: side)
+                    .allowsHitTesting(false)
+            )
+            .opacity(session.canTransmit ? 1 : 0.45)
+            .onAppear(perform: bindActions)
+            .accessibilityElement(children: .ignore)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("Talk")
+            .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe. Hold volum opp inne for å snakke.")
+            .accessibilityAction {
+                if session.isTalking {
+                    session.endTransmitting()
+                } else {
+                    session.beginTransmitting()
+                }
             }
-        }
     }
 
-    private var press: some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { _ in session.beginTransmitting() }
-            .onEnded { _ in session.endTransmitting() }
+    private func bindActions() {
+        actions.begin = { session.beginTransmitting() }
+        actions.end = { session.endTransmitting() }
+    }
+}
+
+/// Fixed hit target. Equality ignores talk state so a press does not rebuild the gesture.
+private struct TalkPressTarget: View, Equatable {
+    var side: CGFloat
+    var enabled: Bool
+    var actions: TalkActions
+
+    static func == (lhs: TalkPressTarget, rhs: TalkPressTarget) -> Bool {
+        lhs.side == rhs.side && lhs.enabled == rhs.enabled
+    }
+
+    var body: some View {
+        Color.clear
+            .frame(width: side, height: side)
+            .contentShape(Circle())
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in actions.begin() }
+                    .onEnded { _ in actions.end() }
+            )
+            .allowsHitTesting(enabled)
     }
 }
 
 private struct TalkButtonFace: View {
     var side: CGFloat
-    var talking: Bool
-    var mode: String
+    var pressed: Bool
 
     var body: some View {
         VStack(spacing: 8) {
-            ModeLabel(mode: faceMode)
-            Image(systemName: talking ? "waveform" : "mic.fill")
-                .font(.system(size: side * 0.18, weight: .semibold))
-                .symbolEffect(.variableColor.iterative, isActive: talking)
-                .foregroundStyle(talking ? Aurora.teal : Color.primary)
-            Text(talking ? "Snakker…" : "Hold for å snakke")
+            Image(systemName: "mic.fill")
+                .font(.system(size: 44, weight: .semibold))
+                .frame(width: 56, height: 56)
+            Text("Talk")
                 .font(.title3.weight(.semibold))
-                .multilineTextAlignment(.center)
-                .minimumScaleFactor(0.5)
+                .lineLimit(1)
+                .frame(width: side - 48, height: 28)
         }
-        .padding(24)
+        .foregroundStyle(pressed ? Aurora.teal : Color.primary)
         .frame(width: side, height: side)
         .background(.ultraThinMaterial, in: Circle())
         .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 1))
-        .glassEffect(.regular.tint(talking ? Aurora.teal : Color.white.opacity(0.15)).interactive(), in: Circle())
-    }
-
-    private var faceMode: String {
-        if talking { return "TX" }
-        return mode
+        .glassEffect(.regular.tint(Color.white.opacity(0.15)), in: Circle())
+        .scaleEffect(pressed ? 0.94 : 1)
+        .animation(.spring(response: 0.22, dampingFraction: 0.72), value: pressed)
     }
 }
 
@@ -951,7 +975,7 @@ private struct GroupRow: View {
     }
 
     private var talkTitle: String {
-        session.talkGroup == group.id ? "Snakk" : "Velg"
+        session.talkGroup == group.id ? "Talk" : "Velg"
     }
 
     private var listenBinding: Binding<Bool> {

@@ -110,6 +110,7 @@ final class WalkieSession: ObservableObject {
     }
 
     private let defaults = UserDefaults.standard
+    let haptics = WalkieHaptics()
     private let engine = VoiceEngine()
     private let socket = WalkieSocket()
     private let transmitter = HoldToTalkTransmitter()
@@ -185,7 +186,9 @@ final class WalkieSession: ObservableObject {
         }
         engine.onSessionReconfigured = { [weak self] in
             Task { @MainActor in
-                self?.volumeButtons.noteSessionReconfigured()
+                guard let self else { return }
+                self.volumeButtons.noteSessionReconfigured()
+                self.haptics.prepare()
             }
         }
         if let token = AccountTokenStore.load(), !token.isEmpty {
@@ -196,7 +199,7 @@ final class WalkieSession: ObservableObject {
             linkState = .connecting
             openAccountSocket()
         }
-        WalkieHaptics.prepare()
+        haptics.prepare()
     }
 
     func savePreferences() {
@@ -604,7 +607,7 @@ final class WalkieSession: ObservableObject {
         let was = transmitter.isTransmitting
         transmitter.beginTransmitting()
         if !was && transmitter.isTransmitting {
-            WalkieHaptics.pressTalk()
+            haptics.pressTalk()
         }
     }
 
@@ -613,7 +616,7 @@ final class WalkieSession: ObservableObject {
         let was = transmitter.isTransmitting
         transmitter.endTransmitting()
         if was && !transmitter.isTransmitting {
-            WalkieHaptics.releaseTalk()
+            haptics.releaseTalk()
         }
     }
 
@@ -621,7 +624,7 @@ final class WalkieSession: ObservableObject {
     /// app is in the foreground and the channel is connected.
     func setVolumeButtonMonitoringEnabled(_ enabled: Bool) {
         if enabled {
-            WalkieHaptics.prepare()
+            haptics.prepare()
             volumeButtons.start { [weak self] holding in
                 guard let self else { return }
                 if holding {
@@ -908,7 +911,7 @@ final class WalkieSession: ObservableObject {
         talkers.append(Talker(id: key, name: name, room: room))
         engine.playTalkBoundaryBeep(isStart: true)
         if !isLocalTalker(id: key, name: name) {
-            WalkieHaptics.remoteStarted()
+            haptics.remoteStarted()
         }
     }
 
@@ -918,7 +921,7 @@ final class WalkieSession: ObservableObject {
         talkers.remove(at: index)
         engine.playTalkBoundaryBeep(isStart: false)
         if !local {
-            WalkieHaptics.remoteStopped()
+            haptics.remoteStopped()
         }
         if talkers.isEmpty {
             engine.markTalkBurstEnded()
