@@ -30,6 +30,68 @@ function publicUser(user) {
   return { id: user.id, username: user.username, displayName: user.displayName };
 }
 
+function utcDay(ms = Date.now()) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function validDay(day) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(day || ''));
+}
+
+/// A banned account can still exist, but it must not receive a session.
+function activeAccount(user) {
+  if (!user) return null;
+  if (user.banned) throw new StoreError('Kontoen er stengt.');
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    warning: user.warning || ''
+  };
+}
+
+function shapeReport(entry) {
+  return {
+    id: entry.id,
+    reporter: entry.reporter || '',
+    targetUsername: entry.targetUsername || '',
+    targetName: entry.targetName || '',
+    room: entry.room || '',
+    reason: entry.reason || '',
+    createdAt: Number(entry.createdAt || 0),
+    status: entry.status || 'open',
+    note: entry.note || '',
+    resolvedAt: Number(entry.resolvedAt || 0),
+    resolvedBy: entry.resolvedBy || '',
+    targetBanned: !!entry.targetBanned
+  };
+}
+
+function fillTalkDays(rows, days = 30) {
+  const byDay = new Map();
+  for (const row of rows || []) {
+    if (!row || !validDay(row.day)) continue;
+    byDay.set(row.day, {
+      transmissions: Number(row.transmissions) || 0,
+      talkMs: Number(row.talkMs != null ? row.talkMs : row.talk_ms) || 0
+    });
+  }
+  const now = new Date();
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const out = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const day = new Date(today - i * 86400000).toISOString().slice(0, 10);
+    const row = byDay.get(day) || { transmissions: 0, talkMs: 0 };
+    out.push({
+      day,
+      transmissions: row.transmissions,
+      talkMs: row.talkMs,
+      talkMinutes: Math.round((row.talkMs / 60000) * 100) / 100
+    });
+  }
+  return out;
+}
+
 function optionalSecret(password) {
   const value = password == null ? '' : String(password).slice(0, 80);
   if (!value) return null;
@@ -61,7 +123,7 @@ class JsonStore {
     this.kind = 'json';
     this.file = file;
     this.chain = Promise.resolve();
-    this.data = { users: [], sessions: [], groups: [], members: [], invites: [], requests: [], blocks: [], reports: [], directRequests: [] };
+    this.data = { users: [], sessions: [], groups: [], members: [], invites: [], requests: [], blocks: [], reports: [], directRequests: [], talkDays: [] };
   }
 
   async open() {
@@ -73,6 +135,7 @@ class JsonStore {
     for (const key of Object.keys(this.data)) {
       if (!Array.isArray(this.data[key])) this.data[key] = [];
     }
+    if (!Array.isArray(this.data.talkDays)) this.data.talkDays = [];
   }
 
   enqueue(fn) {
@@ -104,7 +167,7 @@ class JsonStore {
     return this.enqueue(async () => {
       const user = this.data.users.find((item) => item.username === username);
       if (!user || !secretMatches(password, user)) return null;
-      return publicUser(user);
+      return activeAccount(user);
     });
   }
 
@@ -123,7 +186,7 @@ class JsonStore {
       const session = this.data.sessions.find((item) => item.tokenHash === hash);
       if (!session) return null;
       const user = this.data.users.find((item) => item.id === session.userId);
-      return user ? publicUser(user) : null;
+      return user ? activeAccount(user) : null;
     });
   }
 
@@ -402,7 +465,11 @@ class JsonStore {
         targetUsername: target.username,
         room: room || '',
         reason: String(reason || 'Ingen begrunnelse').slice(0, 500),
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        status: 'open',
+        note: '',
+        resolvedAt: 0,
+        resolvedBy: ''
       };
       this.data.reports.push(entry);
       this.save();
@@ -541,6 +608,185 @@ class JsonStore {
       return [...rooms];
     });
   }
+
+  addTalk(day, transmissions, talkMs) {
+    return this.enqueue(async () => {
+      if (!validDay(day)) return;
+      const tx = Math.max(0, Number(transmissions) || 0);
+      const ms = Math.max(0, Number(talkMs) || 0);
+      if (!tx && !ms) return;
+      if (!Array.isArray(this.data.talkDays)) this.data.talkDays = [];
+      let row = this.data.talkDays.find((item) => item.day === day);
+      if (!row) {
+        row = { day, transmissions: 0, talkMs: 0 };
+        this.data.talkDays.push(row);
+      }
+      row.transmissions += tx;
+      row.talkMs += ms;
+      this.save();
+    });
+  }
+
+  talkHistory() {
+    return this.enqueue(async () => fillTalkDays(this.data.talkDays));
+  }
+
+  counts() {
+    return this.enqueue(async () => ({
+      users: this.data.users.length,
+      groups: this.data.groups.filter((group) => !group.direct).length
+    }));
+  }
+
+  listGroups() {
+    return this.enqueue(async () => this.data.groups.map((group) => ({
+      id: group.id,
+      name: group.direct ? (group.name || 'Direkte') : group.name,
+      direct: !!group.direct,
+      members: this.data.members.filter((member) => member.groupId === group.id).length
+    })).sort((a, b) => Number(a.direct) - Number(b.direct) || String(a.name).localeCompare(String(b.name), 'nb')).slice(0, 200));
+  }
+
+  presentReport(entry) {
+    const target = this.data.users.find((user) => user.id === entry.targetId);
+    return shapeReport({
+      id: entry.id,
+      reporter: entry.reporter,
+      targetUsername: entry.targetUsername,
+      targetName: target ? target.displayName : '',
+      room: entry.room,
+      reason: entry.reason,
+      createdAt: entry.createdAt,
+      status: entry.status,
+      note: entry.note,
+      resolvedAt: entry.resolvedAt,
+      resolvedBy: entry.resolvedBy,
+      targetBanned: !!(target && target.banned)
+    });
+  }
+
+  listReports() {
+    return this.enqueue(async () => this.data.reports
+      .filter((entry) => (entry.status || 'open') === 'open')
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+      .slice(0, 100)
+      .map((entry) => this.presentReport(entry)));
+  }
+
+  getReport(id) {
+    return this.enqueue(async () => {
+      const entry = this.data.reports.find((item) => item.id === id);
+      if (!entry) throw new StoreError('Fant ikke rapporten');
+      return this.presentReport(entry);
+    });
+  }
+
+  closeReport(id, status, adminUsername, note) {
+    return this.enqueue(async () => {
+      if (status !== 'resolved' && status !== 'warned') throw new StoreError('Noe gikk galt');
+      const entry = this.data.reports.find((item) => item.id === id);
+      if (!entry) throw new StoreError('Fant ikke rapporten');
+      if ((entry.status || 'open') !== 'open') throw new StoreError('Rapporten er allerede behandlet.');
+      const text = String(note || entry.reason || '').slice(0, 300);
+      entry.status = status;
+      entry.note = text;
+      entry.resolvedAt = Date.now();
+      entry.resolvedBy = adminUsername || '';
+      if (status === 'warned') {
+        const target = this.data.users.find((user) => user.id === entry.targetId);
+        if (target) target.warning = text;
+      }
+      this.save();
+      return { id: entry.id, targetId: entry.targetId, targetUsername: entry.targetUsername, note: text };
+    });
+  }
+
+  banUser(username, reason, adminUsername) {
+    return this.enqueue(async () => {
+      const user = this.data.users.find((item) => item.username === username);
+      if (!user) throw new StoreError('Fant ikke brukeren');
+      const note = String(reason || '').slice(0, 300);
+      const now = Date.now();
+      user.banned = true;
+      user.bannedAt = now;
+      user.banReason = note;
+      user.warning = '';
+      this.data.sessions = this.data.sessions.filter((session) => session.userId !== user.id);
+      for (const entry of this.data.reports) {
+        if (entry.targetId === user.id && (entry.status || 'open') === 'open') {
+          entry.status = 'banned';
+          entry.note = note;
+          entry.resolvedAt = now;
+          entry.resolvedBy = adminUsername || '';
+        }
+      }
+      this.save();
+      return { id: user.id, username: user.username, displayName: user.displayName };
+    });
+  }
+
+  unbanUser(username) {
+    return this.enqueue(async () => {
+      const user = this.data.users.find((item) => item.username === username);
+      if (!user) throw new StoreError('Fant ikke brukeren');
+      user.banned = false;
+      user.bannedAt = 0;
+      user.banReason = '';
+      this.save();
+      return { id: user.id, username: user.username, displayName: user.displayName };
+    });
+  }
+
+  listUsers(query) {
+    return this.enqueue(async () => {
+      const needle = String(query || '').trim().toLowerCase();
+      return this.data.users
+        .filter((user) => !needle || user.username.includes(needle) || String(user.displayName || '').toLowerCase().includes(needle))
+        .map((user) => ({
+          username: user.username,
+          displayName: user.displayName,
+          banned: !!user.banned,
+          banReason: user.banReason || '',
+          warning: user.warning || ''
+        }))
+        .sort((a, b) => Number(b.banned) - Number(a.banned) || a.username.localeCompare(b.username))
+        .slice(0, 80);
+    });
+  }
+
+  deleteUser(username) {
+    return this.enqueue(async () => {
+      const user = this.data.users.find((item) => item.username === username);
+      if (!user) throw new StoreError('Fant ikke brukeren');
+      return { id: user.id, username: user.username };
+    }).then((user) => this.deleteAccount(user.id).then((rooms) => ({ id: user.id, username: user.username, rooms })));
+  }
+
+  adminDeleteGroup(groupId) {
+    return this.enqueue(async () => {
+      const group = this.data.groups.find((item) => item.id === groupId);
+      if (!group) throw new StoreError('Fant ikke gruppen');
+      const memberIds = this.data.members.filter((item) => item.groupId === groupId).map((item) => item.userId);
+      this.data.groups = this.data.groups.filter((item) => item.id !== groupId);
+      this.data.members = this.data.members.filter((item) => item.groupId !== groupId);
+      this.data.invites = this.data.invites.filter((item) => item.groupId !== groupId);
+      this.data.requests = this.data.requests.filter((item) => item.groupId !== groupId);
+      if (group.direct) {
+        this.data.directRequests = this.data.directRequests.filter((item) => !(memberIds.includes(item.fromId) && memberIds.includes(item.toId)));
+      }
+      this.save();
+      return groupId;
+    });
+  }
+
+  clearWarning(userId) {
+    return this.enqueue(async () => {
+      const user = this.data.users.find((item) => item.id === userId);
+      if (!user || !user.warning) return;
+      user.warning = '';
+      this.save();
+    });
+  }
 }
 
 class PgStore {
@@ -612,6 +858,19 @@ class PgStore {
         user_id TEXT NOT NULL REFERENCES users(id),
         PRIMARY KEY (group_id, user_id)
       );
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS banned BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_at BIGINT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_reason TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS warning TEXT;
+      ALTER TABLE reports ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'open';
+      ALTER TABLE reports ADD COLUMN IF NOT EXISTS resolved_at BIGINT;
+      ALTER TABLE reports ADD COLUMN IF NOT EXISTS resolved_by TEXT;
+      ALTER TABLE reports ADD COLUMN IF NOT EXISTS note TEXT;
+      CREATE TABLE IF NOT EXISTS talk_days (
+        day TEXT PRIMARY KEY,
+        transmissions INTEGER NOT NULL DEFAULT 0,
+        talk_ms BIGINT NOT NULL DEFAULT 0
+      );
     `);
   }
 
@@ -631,10 +890,19 @@ class PgStore {
   }
 
   async verifyLogin(username, password) {
-    const result = await this.pool.query('SELECT id, username, display_name, salt, hash FROM users WHERE username = $1', [username]);
+    const result = await this.pool.query(
+      'SELECT id, username, display_name, salt, hash, banned, warning FROM users WHERE username = $1',
+      [username]
+    );
     const row = result.rows[0];
     if (!row || !secretMatches(password, { salt: row.salt, hash: row.hash })) return null;
-    return { id: row.id, username: row.username, displayName: row.display_name };
+    return activeAccount({
+      id: row.id,
+      username: row.username,
+      displayName: row.display_name,
+      banned: row.banned,
+      warning: row.warning
+    });
   }
 
   async createSession(userId) {
@@ -645,14 +913,20 @@ class PgStore {
 
   async userForToken(token) {
     const result = await this.pool.query(
-      `SELECT u.id, u.username, u.display_name
+      `SELECT u.id, u.username, u.display_name, u.banned, u.warning
        FROM sessions s JOIN users u ON u.id = s.user_id
        WHERE s.token_hash = $1`,
       [tokenHash(token || '')]
     );
     const row = result.rows[0];
     if (!row) return null;
-    return { id: row.id, username: row.username, displayName: row.display_name };
+    return activeAccount({
+      id: row.id,
+      username: row.username,
+      displayName: row.display_name,
+      banned: row.banned,
+      warning: row.warning
+    });
   }
 
   async deleteSession(token) {
@@ -1130,6 +1404,200 @@ class PgStore {
       client.release();
     }
   }
+
+  async addTalk(day, transmissions, talkMs) {
+    if (!validDay(day)) return;
+    const tx = Math.max(0, Number(transmissions) || 0);
+    const ms = Math.max(0, Number(talkMs) || 0);
+    if (!tx && !ms) return;
+    await this.pool.query(
+      `INSERT INTO talk_days (day, transmissions, talk_ms) VALUES ($1, $2, $3)
+       ON CONFLICT (day) DO UPDATE
+       SET transmissions = talk_days.transmissions + EXCLUDED.transmissions,
+           talk_ms = talk_days.talk_ms + EXCLUDED.talk_ms`,
+      [day, tx, ms]
+    );
+  }
+
+  async talkHistory() {
+    const result = await this.pool.query('SELECT day, transmissions, talk_ms FROM talk_days');
+    return fillTalkDays(result.rows);
+  }
+
+  async counts() {
+    const users = await this.pool.query('SELECT COUNT(*)::int AS n FROM users');
+    const groups = await this.pool.query('SELECT COUNT(*)::int AS n FROM groups WHERE direct = FALSE');
+    return { users: users.rows[0].n, groups: groups.rows[0].n };
+  }
+
+  async listGroups() {
+    const result = await this.pool.query(
+      `SELECT g.id, g.name, g.direct, COUNT(m.user_id)::int AS members
+       FROM groups g
+       LEFT JOIN members m ON m.group_id = g.id
+       GROUP BY g.id, g.name, g.direct
+       ORDER BY g.direct ASC, g.name ASC
+       LIMIT 200`
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      name: row.direct ? (row.name || 'Direkte') : row.name,
+      direct: !!row.direct,
+      members: Number(row.members) || 0
+    }));
+  }
+
+  async listReports() {
+    const result = await this.pool.query(
+      `SELECT r.id, r.reporter, r.target_username, r.room, r.reason, r.created_at,
+              r.status, r.note, r.resolved_at, r.resolved_by,
+              u.display_name AS target_name, COALESCE(u.banned, FALSE) AS target_banned
+       FROM reports r
+       LEFT JOIN users u ON u.id = r.target_id
+       WHERE COALESCE(r.status, 'open') = 'open'
+       ORDER BY r.created_at DESC
+       LIMIT 100`
+    );
+    return result.rows.map(pgReport);
+  }
+
+  async getReport(id) {
+    const result = await this.pool.query(
+      `SELECT r.id, r.reporter, r.target_username, r.room, r.reason, r.created_at,
+              r.status, r.note, r.resolved_at, r.resolved_by,
+              u.display_name AS target_name, COALESCE(u.banned, FALSE) AS target_banned
+       FROM reports r
+       LEFT JOIN users u ON u.id = r.target_id
+       WHERE r.id = $1`,
+      [id]
+    );
+    if (!result.rowCount) throw new StoreError('Fant ikke rapporten');
+    return pgReport(result.rows[0]);
+  }
+
+  async closeReport(id, status, adminUsername, note) {
+    if (status !== 'resolved' && status !== 'warned') throw new StoreError('Noe gikk galt');
+    const found = await this.pool.query('SELECT * FROM reports WHERE id = $1', [id]);
+    if (!found.rowCount) throw new StoreError('Fant ikke rapporten');
+    const row = found.rows[0];
+    if ((row.status || 'open') !== 'open') throw new StoreError('Rapporten er allerede behandlet.');
+    const text = String(note || row.reason || '').slice(0, 300);
+    const now = Date.now();
+    if (status === 'warned' && row.target_id) {
+      await this.pool.query('UPDATE users SET warning = $2 WHERE id = $1', [row.target_id, text]);
+    }
+    await this.pool.query(
+      `UPDATE reports SET status = $2, resolved_at = $3, resolved_by = $4, note = $5 WHERE id = $1`,
+      [id, status, now, adminUsername || '', text]
+    );
+    return { id: row.id, targetId: row.target_id, targetUsername: row.target_username, note: text };
+  }
+
+  async banUser(username, reason, adminUsername) {
+    const existing = await this.pool.query(
+      'SELECT id, username, display_name FROM users WHERE username = $1',
+      [username]
+    );
+    if (!existing.rowCount) throw new StoreError('Fant ikke brukeren');
+    const row = existing.rows[0];
+    const note = String(reason || '').slice(0, 300);
+    const now = Date.now();
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'UPDATE users SET banned = TRUE, banned_at = $2, ban_reason = $3, warning = NULL WHERE id = $1',
+        [row.id, now, note]
+      );
+      await client.query('DELETE FROM sessions WHERE user_id = $1', [row.id]);
+      await client.query(
+        `UPDATE reports SET status = 'banned', resolved_at = $2, resolved_by = $3, note = $4
+         WHERE target_id = $1 AND COALESCE(status, 'open') = 'open'`,
+        [row.id, now, adminUsername || '', note]
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch {}
+      throw error;
+    } finally {
+      client.release();
+    }
+    return { id: row.id, username: row.username, displayName: row.display_name };
+  }
+
+  async unbanUser(username) {
+    const result = await this.pool.query(
+      `UPDATE users SET banned = FALSE, banned_at = NULL, ban_reason = NULL
+       WHERE username = $1
+       RETURNING id, username, display_name`,
+      [username]
+    );
+    if (!result.rowCount) throw new StoreError('Fant ikke brukeren');
+    const row = result.rows[0];
+    return { id: row.id, username: row.username, displayName: row.display_name };
+  }
+
+  async listUsers(query) {
+    const raw = String(query || '').trim().toLowerCase().replace(/[\\%_]/g, '\\$&');
+    const result = await this.pool.query(
+      `SELECT username, display_name, banned, ban_reason, warning
+       FROM users
+       WHERE username LIKE $1 ESCAPE '\\' OR LOWER(display_name) LIKE $1 ESCAPE '\\'
+       ORDER BY banned DESC, username ASC
+       LIMIT 80`,
+      ['%' + raw + '%']
+    );
+    return result.rows.map((row) => ({
+      username: row.username,
+      displayName: row.display_name,
+      banned: !!row.banned,
+      banReason: row.ban_reason || '',
+      warning: row.warning || ''
+    }));
+  }
+
+  async deleteUser(username) {
+    const result = await this.pool.query('SELECT id, username FROM users WHERE username = $1', [username]);
+    if (!result.rowCount) throw new StoreError('Fant ikke brukeren');
+    const rooms = await this.deleteAccount(result.rows[0].id);
+    return { id: result.rows[0].id, username: result.rows[0].username, rooms };
+  }
+
+  async adminDeleteGroup(groupId) {
+    const group = await this.pool.query('SELECT id, direct FROM groups WHERE id = $1', [groupId]);
+    if (!group.rowCount) throw new StoreError('Fant ikke gruppen');
+    const members = await this.pool.query('SELECT user_id FROM members WHERE group_id = $1', [groupId]);
+    await this.pool.query('DELETE FROM groups WHERE id = $1', [groupId]);
+    if (group.rows[0].direct && members.rowCount) {
+      const ids = members.rows.map((row) => row.user_id);
+      await this.pool.query(
+        'DELETE FROM direct_requests WHERE from_id = ANY($1::text[]) AND to_id = ANY($1::text[])',
+        [ids]
+      );
+    }
+    return groupId;
+  }
+
+  async clearWarning(userId) {
+    await this.pool.query('UPDATE users SET warning = NULL WHERE id = $1', [userId]);
+  }
+}
+
+function pgReport(row) {
+  return shapeReport({
+    id: row.id,
+    reporter: row.reporter,
+    targetUsername: row.target_username,
+    targetName: row.target_name || '',
+    room: row.room,
+    reason: row.reason,
+    createdAt: Number(row.created_at || 0),
+    status: row.status,
+    note: row.note,
+    resolvedAt: Number(row.resolved_at || 0),
+    resolvedBy: row.resolved_by || '',
+    targetBanned: !!row.target_banned
+  });
 }
 
 async function openStore() {
@@ -1151,4 +1619,4 @@ async function openStore() {
   return store;
 }
 
-module.exports = { openStore, StoreError };
+module.exports = { openStore, StoreError, utcDay };

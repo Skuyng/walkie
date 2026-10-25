@@ -3,7 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
-const { openStore, StoreError } = require('./store');
+const { openStore, StoreError, utcDay } = require('./store');
+const { createAdminHandler } = require('./admin');
+const pkgVersion = require('./package.json').version;
 
 const types = {
   '.html': 'text/html; charset=utf-8',
@@ -38,9 +40,48 @@ function gitSha() {
 }
 
 let store;
+const recentErrors = [];
+const startedAt = Date.now();
+let handleAdmin = async (req, res) => {
+  res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify({ error: 'Noe gikk galt' }));
+};
+
+function noteError(error) {
+  const message = String((error && error.message) || error || 'error').slice(0, 300);
+  recentErrors.push({ at: Date.now(), message });
+  while (recentErrors.length > 40) recentErrors.shift();
+  console.error(error);
+}
+
+function beginTalk(ws) {
+  if (!ws || ws.talkingSince) return;
+  ws.talkingSince = Date.now();
+  if (!store) return;
+  store.addTalk(utcDay(ws.talkingSince), 1, 0).catch((error) => noteError(error));
+}
+
+function endTalk(ws) {
+  if (!ws || !ws.talkingSince) return;
+  const started = ws.talkingSince;
+  ws.talkingSince = 0;
+  const ms = Math.max(0, Date.now() - started);
+  if (!store) return;
+  store.addTalk(utcDay(started), 0, ms).catch((error) => noteError(error));
+}
 
 const srv = http.createServer((q, r) => {
   let p = q.url.split('?')[0];
+  if (p === '/admin' || p.startsWith('/admin/')) {
+    handleAdmin(q, r).catch((error) => {
+      noteError(error);
+      if (!r.headersSent) {
+        r.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        r.end(JSON.stringify({ error: 'Noe gikk galt' }));
+      }
+    });
+    return;
+  }
   if (p === '/version') {
     const sha = gitSha();
     r.writeHead(200, {
@@ -192,6 +233,10 @@ async function establish(ws, user, token) {
   applyMembership(ws, groups || []);
   const affected = new Set([...previous, ...ws.auth]);
   for (const room of affected) sendUsers(room);
+  if (user.warning) {
+    sendError(ws, '', 'Advarsel: ' + user.warning);
+    store.clearWarning(user.id).catch((error) => noteError(error));
+  }
 }
 
 function requireUser(ws) {
@@ -288,12 +333,10 @@ async function reportUser(ws, message) {
   send(ws, { t: 'reported' });
 }
 
-async function deleteAccount(ws) {
-  if (!requireUser(ws)) return;
-  const userId = ws.user.id;
-  const rooms = await store.deleteAccount(userId);
+async function dropUserSockets(userId, rooms) {
   for (const client of wss.clients) {
     if (!client.user || client.user.id !== userId) continue;
+    endTalk(client);
     send(client, { t: 'deleted' });
     client.user = null;
     client.token = '';
@@ -306,6 +349,43 @@ async function deleteAccount(ws) {
     client.blocked = new Set();
   }
   await syncAll(rooms || []);
+}
+
+function disconnectBanned(userId) {
+  for (const client of wss.clients) {
+    if (!client.user || client.user.id !== userId) continue;
+    endTalk(client);
+    sendError(client, '', 'Kontoen er stengt.');
+    client.close();
+  }
+}
+
+async function deliverWarning(userId, text) {
+  if (!userId || !text) return;
+  let seen = false;
+  for (const client of wss.clients) {
+    if (client.readyState !== 1 || !client.user || client.user.id !== userId) continue;
+    sendError(client, '', 'Advarsel: ' + text);
+    seen = true;
+  }
+  if (seen) {
+    try { await store.clearWarning(userId); } catch (error) { noteError(error); }
+  }
+}
+
+function onlineCount() {
+  const ids = new Set();
+  for (const client of wss.clients) {
+    if (client.readyState === 1 && client.user) ids.add(client.user.id);
+  }
+  return ids.size;
+}
+
+async function deleteAccount(ws) {
+  if (!requireUser(ws)) return;
+  const userId = ws.user.id;
+  const rooms = await store.deleteAccount(userId);
+  await dropUserSockets(userId, rooms);
 }
 
 async function logout(ws) {
@@ -507,6 +587,7 @@ async function subscribe(ws, message) {
 
 wss.on('connection', (ws) => {
   ws.isAlive = true;
+  ws.talkingSince = 0;
   ws.peerId = crypto.randomBytes(8).toString('hex');
   ws.auth = new Set();
   ws.rooms = new Set();
@@ -534,11 +615,12 @@ wss.on('connection', (ws) => {
     if (!message || typeof message.t !== 'string') return;
     handleMessage(ws, message).catch((error) => {
       const text = error instanceof StoreError ? error.message : 'Noe gikk galt';
-      if (!(error instanceof StoreError)) console.error(error);
+      if (!(error instanceof StoreError)) noteError(error);
       sendError(ws, normRoom(message.room), text);
     });
   });
   ws.on('close', () => {
+    endTalk(ws);
     const name = ws.name;
     const rooms = new Set([...(ws.auth || []), ...(ws.rooms || [])]);
     ws.auth = new Set();
@@ -592,6 +674,8 @@ async function handleMessage(ws, message) {
       return;
     }
     if (ws.talk && ws.talk !== room) return;
+    if (message.t === 'start') beginTalk(ws);
+    else endTalk(ws);
     bc(room, JSON.stringify({ t: message.t, name: ws.name, room, id: ws.peerId }), ws, false);
   }
 }
@@ -603,6 +687,24 @@ setInterval(() => {
     client.ping();
   }
 }, 20000);
+
+handleAdmin = createAdminHandler({
+  getStore: () => store,
+  onlineCount,
+  noteError,
+  status: () => ({
+    uptime: Math.round(process.uptime()),
+    startedAt,
+    version: pkgVersion,
+    sha: gitSha(),
+    store: store ? store.kind : 'starting',
+    errors: recentErrors.slice(-20).reverse()
+  }),
+  onBanned: async (userId) => { disconnectBanned(userId); },
+  onDeleted: async (userId, rooms) => { await dropUserSockets(userId, rooms); },
+  onWarned: async (userId, text) => { await deliverWarning(userId, text); },
+  onGroupDeleted: async (room) => { await syncAll(room ? [room] : []); }
+});
 
 const port = process.env.PORT || 8080;
 openStore().then((opened) => {

@@ -395,6 +395,8 @@ enum L10n {
         "Opprett en gruppe, eller start en direkte samtale.": "Create a group, or start a direct conversation.",
         "Serveradressen må være ws:// eller wss://.": "The server address must be ws:// or wss://.",
         "Rapporten er sendt.": "The report was sent.",
-        "Kontoen er slettet.": "The account was deleted."
+        "Kontoen er slettet.": "The account was deleted.",
+        "Kontoen er stengt.": "This account is closed.",
+        "Advarsel: Uakseptabel oppførsel": "Warning: Unacceptable behavior"
     ]
 }

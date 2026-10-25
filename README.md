@@ -9,11 +9,21 @@ npm install
 npm start
 ```
 
-Serveren lytter på `PORT` fra miljøet, ellers port 8080. Åpne adressen i nettleseren og tillat mikrofon. `GET /version` svarer med git-revisjonen fra `RENDER_GIT_COMMIT` og feltet `store` (`postgres`, `json` eller `starting`). `node scripts/relay-check.js --local` oppretter to kontoer, sjekker invitasjon og at lyd bare går til medlemmer.
+Serveren lytter på `PORT` fra miljøet, ellers port 8080. Åpne adressen i nettleseren og tillat mikrofon. `GET /version` svarer med git-revisjonen fra `RENDER_GIT_COMMIT` og feltet `store` (`postgres`, `json` eller `starting`). `node scripts/relay-check.js --local` oppretter to kontoer, sjekker invitasjon og at lyd bare går til medlemmer. `node scripts/admin-check.js` sjekker `/admin`.
 
 ## Lagring på Render
 
-Render sletter gratis disk ved omstart. Opprett en **Render Postgres** (gratis) og sett miljøvariabelen **`DATABASE_URL`** på webtjenesten til databasens **Internal Database URL** (`postgres://…`). Det er den eneste variabelen som trengs. Deploy på nytt manuelt etterpå (auto-deploy-webhooken fyrer ikke). `GET /version` skal da vise `"store":"postgres"`. Tabellene lages av serveren.
+Render sletter gratis disk ved omstart. Opprett en **Render Postgres** (gratis) og sett miljøvariabelen **`DATABASE_URL`** på webtjenesten til databasens **Internal Database URL** (`postgres://…`). Det er den eneste variabelen som må settes. Deploy på nytt manuelt etterpå (auto-deploy-webhooken fyrer ikke). `GET /version` skal da vise `"store":"postgres"`. Tabellene og nye kolonner lages når serveren starter.
+
+`/admin` er panelet for kontoene i **`ADMIN_USERNAMES`** (kommaseparert). Uten variabelen er det `skuyng`. Innlogging bruker samme brukernavn og passord som appen. Økten er en HttpOnly-cookie på `/admin`, og feilede innlogginger stoppes etter åtte forsøk på et kvarter per IP. En utestengt bruker kan ikke logge inn eller koble til.
+
+Ved oppstart kjøres disse endringene av seg selv, også på en database som allerede finnes:
+
+- `users.banned` (boolean, standard false), `users.banned_at`, `users.ban_reason`, `users.warning`
+- `reports.status` (standard `open`), `reports.resolved_at`, `reports.resolved_by`, `reports.note`
+- tabellen `talk_days` (`day`, `transmissions`, `talk_ms`) for sendinger og taleminutter
+
+`node scripts/admin-check.js` sjekker panelet mot JSON-lageret.
 
 Uten `DATABASE_URL` lagres brukere og grupper i `data/walkie.json`. Den filen forsvinner når Render starter disken på nytt.
 
