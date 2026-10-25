@@ -292,6 +292,7 @@ class JsonStore {
       if (!user) throw new StoreError('Fant ikke brukeren');
       const member = this.data.members.find((item) => item.groupId === groupId && item.userId === user.id);
       if (!member) throw new StoreError('Ikke medlem');
+      if (user.id === adminId) throw new StoreError('Du kan ikke fjerne deg selv.');
       if (member.role === 'admin') throw new StoreError('Admin kan ikke fjernes');
       this.data.members = this.data.members.filter((item) => item !== member);
       this.data.invites = this.data.invites.filter((item) => !(item.groupId === groupId && item.userId === user.id));
@@ -608,6 +609,7 @@ class PgStore {
     if (!user) throw new StoreError('Fant ikke brukeren');
     const member = await this.pool.query('SELECT role FROM members WHERE group_id = $1 AND user_id = $2', [groupId, user.id]);
     if (!member.rowCount) throw new StoreError('Ikke medlem');
+    if (user.id === adminId) throw new StoreError('Du kan ikke fjerne deg selv.');
     if (member.rows[0].role === 'admin') throw new StoreError('Admin kan ikke fjernes');
     await this.pool.query('DELETE FROM members WHERE group_id = $1 AND user_id = $2', [groupId, user.id]);
     await this.pool.query('DELETE FROM invites WHERE group_id = $1 AND user_id = $2', [groupId, user.id]);

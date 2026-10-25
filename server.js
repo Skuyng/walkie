@@ -135,6 +135,17 @@ async function sendInbox(ws) {
   return groups;
 }
 
+function dropRoom(client, room) {
+  ensureSets(client);
+  client.auth.delete(room);
+  client.rooms.delete(room);
+  client.muted.delete(room);
+  if (client.talk === room) {
+    client.talk = firstRoom(client.rooms) || firstRoom(client.auth);
+    client.room = client.talk || '';
+  }
+}
+
 function applyMembership(ws, groups) {
   ensureSets(ws);
   const allowed = new Set(groups.map((group) => group.id));
@@ -320,7 +331,23 @@ async function removeMember(ws, message) {
   if (!requireUser(ws)) return;
   const room = normRoom(message.room);
   const username = normUser(message.username);
+  if (!room || !validUser(username)) {
+    sendError(ws, room, 'Skriv et brukernavn.');
+    return;
+  }
+  if (username === ws.username) {
+    sendError(ws, room, 'Du kan ikke fjerne deg selv.');
+    return;
+  }
   await store.removeMember(ws.user.id, room, username);
+  for (const client of wss.clients) {
+    if (client.readyState !== 1 || client.username !== username) continue;
+    const name = client.name;
+    const id = client.peerId;
+    dropRoom(client, room);
+    if (name) bc(room, JSON.stringify({ t: 'stop', name, room, id }), null, false);
+    sendError(client, room, 'Du er fjernet fra gruppen');
+  }
   await syncAll([room]);
 }
 

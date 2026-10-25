@@ -137,7 +137,7 @@ function onTool(e){
   }
   if(act==='yesinv'||act==='noinv')send({t:'inviteReply',room:id,accept:act==='yesinv'});
   if(act==='yesreq'||act==='noreq')send({t:'requestReply',room:id,username:user,accept:act==='yesreq'});
-  if(act==='kick')send({t:'removeMember',room:id,username:user});
+  if(act==='kick'){if(confirm('Fjerne @'+user+' fra gruppen?'))send({t:'removeMember',room:id,username:user})}
   if(act==='setpass'||act==='clearpass'){
     const field=document.querySelector('[data-pass="'+CSS.escape(id)+'"]');
     const secret=act==='clearpass'?'':String(field?field.value:'').slice(0,80);
@@ -182,6 +182,7 @@ function onMessage(e){
   if(m.t==='error'){
     const room=m.room||'';
     const text=m.error||'Noe gikk galt';
+    if(String(text).indexOf('fjernet')>=0){talking=false;$('ptt').classList.remove('on');$('ptt').textContent='Hold for å snakke'}
     if(!authed){
       if(text==='Logg inn')localStorage.removeItem('tok');
       tok=localStorage.tok||'';

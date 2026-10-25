@@ -764,6 +764,9 @@ final class WalkieSession: ObservableObject {
                 prepareVolumeHUD()
                 return
             }
+            if text == "Du er fjernet fra gruppen" {
+                endTransmitting()
+            }
             if !room.isEmpty {
                 joinProblems[room] = text
             }
@@ -830,6 +833,9 @@ final class WalkieSession: ObservableObject {
         }
         preferTalk = nil
         if !next.contains(where: { $0.id == talkGroup }) {
+            if isTalking {
+                endTransmitting()
+            }
             talkGroup = next.first?.id ?? ""
         }
         syncRoomName()

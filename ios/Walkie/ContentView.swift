@@ -900,6 +900,7 @@ private struct RosterLine: View {
     @ObservedObject var session: WalkieSession
     let groupID: String
     let member: AccountMember
+    @State private var confirmRemove = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -907,10 +908,20 @@ private struct RosterLine: View {
                 .font(.subheadline)
             Spacer(minLength: 8)
             if canRemove {
-                Button("Fjern") { session.removeMember(room: groupID, username: member.username) }
+                Button("Fjern") { confirmRemove = true }
                     .buttonStyle(.glass)
             }
         }
+        .confirmationDialog(confirmTitle, isPresented: $confirmRemove, titleVisibility: .visible) {
+            Button("Fjern", role: .destructive, action: remove)
+            Button("Avbryt", role: .cancel) {}
+        } message: {
+            Text("Medlemmet mister tilgang til gruppen.")
+        }
+    }
+
+    private var confirmTitle: String {
+        "Fjerne \(memberLine)?"
     }
 
     private var memberLine: String {
@@ -920,6 +931,10 @@ private struct RosterLine: View {
 
     private var canRemove: Bool {
         member.username != session.accountUsername && member.role != "admin"
+    }
+
+    private func remove() {
+        session.removeMember(room: groupID, username: member.username)
     }
 }
 

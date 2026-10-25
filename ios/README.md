@@ -38,7 +38,7 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Bli med** — når du skriver gruppepassordet, blir du medlem med en gang. Feil passord vises som «Feil passord». En lås vises på grupper som har passord.
 - **Lagre passord / Fjern passord** — admin bytter eller fjerner gruppepassordet.
 - **Invitér** — admin skriver et brukernavn. Invitasjonen vises hos den andre under Invitasjoner, med Godta og Avslå.
-- **Fjern** — admin kan fjerne andre medlemmer. Admin sletter gruppen. Medlemmer forlater den.
+- **Fjern** — admin ser knappen ved andre medlemmer og må bekrefte. Den som blir fjernet får beskjed og hører ikke gruppen lenger. Admin kan ikke fjerne seg selv. Admin sletter gruppen. Medlemmer forlater den.
 - **Lytt** — på per gruppe. Du kan lytte til flere samtidig. Av gjør at du fortsatt ser hvem som er pålogget, men ikke hører lyden.
 - **Snakk / Velg** — én gruppe om gangen. Hold-for-å-snakke og volum opp sender bare dit.
 - **Pålogget** — grønn prikk ved navnet. Den som snakker utheves.

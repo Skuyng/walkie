@@ -154,8 +154,15 @@ async function startServer() {
   const caraAudio = await waitFor(cara.inbox, (entry) => entry.bin, 3000, caraHear);
   if (!caraAudio.data.equals(frame)) throw new Error('invitee missed audio');
 
+  const selfAt = ada.inbox.length;
+  send(ada, { t: 'removeMember', room: 'familie', username: 'ada' });
+  const selfKick = jsonText(await waitFor(ada.inbox, (entry) => !entry.bin && entry.text.includes('fjerne deg selv'), 4000, selfAt));
+  if (!String(selfKick.error || '').includes('fjerne deg selv')) throw new Error('admin removed self');
+
   const removedAt = bob.inbox.length;
   send(ada, { t: 'removeMember', room: 'familie', username: 'bob' });
+  const kicked = jsonText(await waitFor(bob.inbox, (entry) => !entry.bin && entry.text.includes('fjernet'), 4000, removedAt));
+  if (!String(kicked.error || '').includes('fjernet')) throw new Error('kicked user was not notified');
   await waitFor(bob.inbox, (entry) => {
     if (entry.bin) return false;
     try {
@@ -167,6 +174,10 @@ async function startServer() {
   ada.ws.send(frame);
   await new Promise((resolve) => setTimeout(resolve, 250));
   if (bob.inbox.slice(after).some((entry) => entry.bin)) throw new Error('removed member still received audio');
+  const adaAfter = ada.inbox.length;
+  bob.ws.send(frame);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (ada.inbox.slice(adaAfter).some((entry) => entry.bin)) throw new Error('kicked user still transmitted');
 
   const passAt = ada.inbox.length;
   send(ada, { t: 'setPassword', room: 'familie', password: 'hemmelig' });
