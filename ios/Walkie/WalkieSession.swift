@@ -196,6 +196,7 @@ final class WalkieSession: ObservableObject {
             linkState = .connecting
             openAccountSocket()
         }
+        WalkieHaptics.prepare()
     }
 
     func savePreferences() {
@@ -600,18 +601,27 @@ final class WalkieSession: ObservableObject {
     }
 
     func beginTransmitting() {
+        let was = transmitter.isTransmitting
         transmitter.beginTransmitting()
+        if !was && transmitter.isTransmitting {
+            WalkieHaptics.pressTalk()
+        }
     }
 
     /// Stops sending. Does not change the audio session category or mode.
     func endTransmitting() {
+        let was = transmitter.isTransmitting
         transmitter.endTransmitting()
+        if was && !transmitter.isTransmitting {
+            WalkieHaptics.releaseTalk()
+        }
     }
 
     /// Volume-up holds transmitting only while the caller reports that the
     /// app is in the foreground and the channel is connected.
     func setVolumeButtonMonitoringEnabled(_ enabled: Bool) {
         if enabled {
+            WalkieHaptics.prepare()
             volumeButtons.start { [weak self] holding in
                 guard let self else { return }
                 if holding {
@@ -871,6 +881,13 @@ final class WalkieSession: ObservableObject {
         }
     }
 
+    private func isLocalTalker(id: String, name talkerName: String) -> Bool {
+        if id == "local" { return true }
+        if !selfID.isEmpty && id == selfID { return true }
+        if selfID.isEmpty && isTalking && !talkerName.isEmpty && talkerName == name { return true }
+        return false
+    }
+
     private func includesSelf(_ members: [RoomMember]) -> Bool {
         if !selfID.isEmpty, members.contains(where: { $0.id == selfID }) { return true }
         if selfID.isEmpty, members.contains(where: { $0.name == name }) { return true }
@@ -890,12 +907,19 @@ final class WalkieSession: ObservableObject {
         guard !talkers.contains(where: { $0.id == key && $0.room == room }) else { return }
         talkers.append(Talker(id: key, name: name, room: room))
         engine.playTalkBoundaryBeep(isStart: true)
+        if !isLocalTalker(id: key, name: name) {
+            WalkieHaptics.remoteStarted()
+        }
     }
 
     private func removeTalker(id: String, room: String) {
         guard let index = talkers.firstIndex(where: { $0.id == id && $0.room == room }) else { return }
+        let local = isLocalTalker(id: id, name: "")
         talkers.remove(at: index)
         engine.playTalkBoundaryBeep(isStart: false)
+        if !local {
+            WalkieHaptics.remoteStopped()
+        }
         if talkers.isEmpty {
             engine.markTalkBurstEnded()
         }

@@ -4,7 +4,6 @@ import UIKit
 struct ContentView: View {
     @StateObject private var session = WalkieSession()
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.colorScheme) private var colorScheme
     @FocusState private var focus: Field?
     @State private var darkMode = false
     @State private var savedBrightness: CGFloat?
@@ -16,7 +15,7 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            WalkieBackdrop(transmitting: session.isTalking)
+            AuroraBackground(live: auroraLive)
             if !session.signedIn {
                 AccountGate(session: session)
             } else if session.hasConnectedOnce {
@@ -30,7 +29,16 @@ struct ContentView: View {
         }
         .statusBarHidden(darkMode)
         .persistentSystemOverlays(darkMode ? .hidden : .automatic)
+        .preferredColorScheme(.dark)
+        .tint(Aurora.teal)
+        .task {
+            while !Task.isCancelled {
+                WalkieHaptics.prepare()
+                try? await Task.sleep(for: .seconds(1.5))
+            }
+        }
         .onAppear {
+            WalkieHaptics.prepare()
             session.prepareVolumeHUD()
             refreshVolumeButtons()
         }
@@ -59,6 +67,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showGroups) {
             GroupSheet(session: session)
+                .presentationBackground {
+                    AuroraBackground(live: auroraLive)
+                }
         }
         .alert(session.suggestsSettings ? "Mikrofon" : "Obs", isPresented: errorPresented) {
             Button("OK", role: .cancel) {}
@@ -82,7 +93,7 @@ struct ContentView: View {
                         Image(systemName: "dot.radiowaves.left.and.right")
                             .font(.system(size: 34, weight: .semibold))
                             .frame(width: 88, height: 88)
-                            .glassEffect(.regular.tint(.red), in: Circle())
+                            .glassEffect(.regular.tint(Aurora.teal), in: Circle())
                         Text("Walkie")
                             .font(.largeTitle.weight(.bold))
                         Text(accountCaption)
@@ -102,7 +113,7 @@ struct ContentView: View {
                             .submitLabel(.go)
                             .focused($focus, equals: .server)
                             .onSubmit { session.connect() }
-                            .glassFieldChrome()
+                            .auroraField()
                     }
 
                     Button(action: session.connect) {
@@ -115,7 +126,7 @@ struct ContentView: View {
                         .padding(.vertical, 6)
                     }
                     .buttonStyle(.glassProminent)
-                    .tint(.red)
+                    .tint(Aurora.teal)
                     .controlSize(.large)
                     .disabled(session.linkState == .connecting || session.linkState == .reconnecting)
                     .padding(.top, 4)
@@ -152,7 +163,7 @@ struct ContentView: View {
             let side = min(geo.size.width - 64, max(220, geo.size.height - 240))
             GlassEffectContainer(spacing: 16) {
                 VStack(spacing: 18) {
-                    TalkGroupPill(title: talkCaption, action: openGroups)
+                    TuningReadout(code: talkCode, name: channelName, mode: radioMode, action: openGroups)
                     JoinBanner(text: session.joinProblem(for: session.talkGroup))
                     Spacer(minLength: 0)
                     speakerRow
@@ -193,63 +204,35 @@ struct ContentView: View {
             Text(session.speakerLine.isEmpty ? " " : session.speakerLine)
                 .multilineTextAlignment(.center)
         }
-        .font(.title3.weight(.semibold))
-        .foregroundStyle(.orange)
+        .font(.system(.title3, design: .monospaced).weight(.semibold))
+        .foregroundStyle(Aurora.teal)
         .opacity(session.speakerLine.isEmpty ? 0 : 1)
         .accessibilityHidden(session.speakerLine.isEmpty)
     }
 
     private func talkButton(side: CGFloat) -> some View {
-        let glass: Glass = session.isTalking
-            ? .regular.tint(.red).interactive()
-            : .regular.interactive()
-        return ZStack {
-            Circle()
-                .fill(Color.red.opacity(session.isTalking ? (colorScheme == .dark ? 0.55 : 0.38) : 0))
-                .blur(radius: 46)
-                .frame(width: side * 0.92, height: side * 0.92)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-
-            VStack(spacing: 10) {
-                Image(systemName: session.isTalking ? "waveform" : "mic.fill")
-                    .font(.system(size: side * 0.2, weight: .semibold))
-                    .symbolEffect(.variableColor.iterative, isActive: session.isTalking)
-                    .foregroundStyle(session.isTalking ? Color.red : Color.primary)
-                Text(session.isTalking ? "Snakker…" : "Hold for å snakke")
-                    .font(.title2.weight(.bold))
-                    .multilineTextAlignment(.center)
-                    .minimumScaleFactor(0.5)
-            }
-            .padding(28)
-            .frame(width: side, height: side)
-            .glassEffect(glass, in: Circle())
-        }
-        .opacity(session.canTransmit ? 1 : 0.45)
-        .scaleEffect(session.isTalking ? 1.04 : 1)
-        .animation(.smooth(duration: 0.22), value: session.isTalking)
-        .contentShape(Circle())
-        .highPriorityGesture(talkGesture)
-        .allowsHitTesting(session.canTransmit)
-        .accessibilityElement(children: .ignore)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(session.isTalking ? "Snakker" : "Hold for å snakke")
-        .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe. Hold volum opp inne for å snakke.")
-        .accessibilityAction {
-            if session.isTalking {
-                session.endTransmitting()
-            } else {
-                session.beginTransmitting()
-            }
-        }
-        .sensoryFeedback(.impact(weight: .medium), trigger: session.isTalking)
+        TalkButton(session: session, side: side, mode: radioMode)
     }
 
-    private var talkCaption: String {
+    private var auroraLive: Bool {
+        session.isTalking || !session.talkers.isEmpty
+    }
+
+    private var talkCode: String {
+        ChannelCode.label(id: session.talkGroup, groups: session.groups)
+    }
+
+    private var channelName: String {
         let match = session.groups.first { $0.id == session.talkGroup }
         let label = match?.name ?? session.room
         if label.isEmpty { return "Ingen gruppe" }
-        return "Snakker i: \(label)"
+        return label
+    }
+
+    private var radioMode: String {
+        if session.isTalking { return "TX" }
+        if !session.talkers.isEmpty { return "RX" }
+        return ""
     }
 
     private var statusSymbol: String {
@@ -271,10 +254,7 @@ struct ContentView: View {
         ZStack {
             Color.black
             if session.isTalking {
-                Circle()
-                    .fill(Color.red.opacity(0.22))
-                    .frame(width: 8, height: 8)
-                    .accessibilityHidden(true)
+                LedDot(on: true)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -329,12 +309,6 @@ struct ContentView: View {
         session.setVolumeButtonMonitoringEnabled(listen)
     }
 
-    private var talkGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { _ in session.beginTransmitting() }
-            .onEnded { _ in session.endTransmitting() }
-    }
-
     private func labeledField<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
@@ -349,6 +323,73 @@ struct ContentView: View {
             get: { session.errorMessage != nil },
             set: { if !$0 { session.dismissError() } }
         )
+    }
+}
+
+private struct TalkButton: View {
+    @ObservedObject var session: WalkieSession
+    var side: CGFloat
+    var mode: String
+
+    var body: some View {
+        ZStack {
+            AuroraRings(pulsing: session.isTalking)
+                .frame(width: side, height: side)
+            TalkButtonFace(side: side, talking: session.isTalking, mode: mode)
+        }
+        .opacity(session.canTransmit ? 1 : 0.45)
+        .scaleEffect(session.isTalking ? 0.94 : 1)
+        .animation(.spring(response: 0.22, dampingFraction: 0.72), value: session.isTalking)
+        .contentShape(Circle())
+        .highPriorityGesture(press)
+        .allowsHitTesting(session.canTransmit)
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(session.isTalking ? "Snakker" : "Hold for å snakke")
+        .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe. Hold volum opp inne for å snakke.")
+        .accessibilityAction {
+            if session.isTalking {
+                session.endTransmitting()
+            } else {
+                session.beginTransmitting()
+            }
+        }
+    }
+
+    private var press: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { _ in session.beginTransmitting() }
+            .onEnded { _ in session.endTransmitting() }
+    }
+}
+
+private struct TalkButtonFace: View {
+    var side: CGFloat
+    var talking: Bool
+    var mode: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ModeLabel(mode: faceMode)
+            Image(systemName: talking ? "waveform" : "mic.fill")
+                .font(.system(size: side * 0.18, weight: .semibold))
+                .symbolEffect(.variableColor.iterative, isActive: talking)
+                .foregroundStyle(talking ? Aurora.teal : Color.primary)
+            Text(talking ? "Snakker…" : "Hold for å snakke")
+                .font(.title3.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .minimumScaleFactor(0.5)
+        }
+        .padding(24)
+        .frame(width: side, height: side)
+        .background(.ultraThinMaterial, in: Circle())
+        .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 1))
+        .glassEffect(.regular.tint(talking ? Aurora.teal : Color.white.opacity(0.15)).interactive(), in: Circle())
+    }
+
+    private var faceMode: String {
+        if talking { return "TX" }
+        return mode
     }
 }
 
@@ -399,7 +440,7 @@ private struct CenterStatusLine: View {
 
     var body: some View {
         Label(text, systemImage: symbol)
-            .font(.subheadline.weight(.medium))
+            .font(.system(.subheadline, design: .monospaced).weight(.medium))
             .foregroundStyle(.secondary)
             .symbolRenderingMode(.hierarchical)
     }
@@ -474,6 +515,7 @@ private struct GroupSheet: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             }
+            .scrollContentBackground(.hidden)
             .navigationTitle("Grupper")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -510,7 +552,7 @@ private struct AccountGate: View {
                         Image(systemName: "dot.radiowaves.left.and.right")
                             .font(.system(size: 34, weight: .semibold))
                             .frame(width: 88, height: 88)
-                            .glassEffect(.regular.tint(.red), in: Circle())
+                            .glassEffect(.regular.tint(Aurora.teal), in: Circle())
                         Text("Walkie")
                             .font(.largeTitle.weight(.bold))
                         Text("Logg inn, eller opprett en konto.")
@@ -560,7 +602,7 @@ private struct AccountGate: View {
                             .glassFieldChrome()
                     }
                     Toggle("Jeg godtar vilkårene", isOn: $acceptedTerms)
-                        .tint(.red)
+                        .tint(Aurora.teal)
                     LegalLinks(server: session.serverURL)
                     Button(action: signUp) {
                         Text("Opprett konto")
@@ -569,7 +611,7 @@ private struct AccountGate: View {
                             .padding(.vertical, 6)
                     }
                     .buttonStyle(.glassProminent)
-                    .tint(.red)
+                    .tint(Aurora.teal)
                     .controlSize(.large)
                     .disabled(busy || !acceptedTerms)
                     Button(action: logIn) {
@@ -648,7 +690,7 @@ private struct GroupEditor: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glassProminent)
-                .tint(.red)
+                .tint(Aurora.teal)
                 Button(action: joinTapped) {
                     Text(joinTitle)
                         .frame(maxWidth: .infinity)
@@ -708,21 +750,20 @@ private struct InviteRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(invite.name)
-                .font(.headline)
+                .font(.system(.headline, design: .monospaced))
             Text(fromLine)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             HStack(spacing: 10) {
                 Button("Godta") { session.replyInvite(room: invite.room, accept: true) }
-                    .buttonStyle(.glassProminent)
-                    .tint(.red)
-                Button("Avslå") { session.replyInvite(room: invite.room, accept: false) }
+                .buttonStyle(.glassProminent)
+                .tint(Aurora.teal)
+            Button("Avslå") { session.replyInvite(room: invite.room, accept: false) }
                     .buttonStyle(.glass)
             }
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .auroraCard()
     }
 
     private var fromLine: String {
@@ -780,7 +821,7 @@ private struct DirectRequestRow: View {
                 if request.incoming {
                     Button("Godta") { session.replyDirect(username: request.username, accept: true) }
                         .buttonStyle(.glassProminent)
-                        .tint(.red)
+                        .tint(Aurora.teal)
                     Button("Avslå") { session.replyDirect(username: request.username, accept: false) }
                         .buttonStyle(.glass)
                 } else {
@@ -789,9 +830,8 @@ private struct DirectRequestRow: View {
                 }
             }
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .auroraCard()
     }
 
     private var person: String {
@@ -830,13 +870,13 @@ private struct GroupRow: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 if group.direct {
-                    Circle()
-                        .fill(session.peerIsOnline(in: group.id) ? Color.green : Color.secondary.opacity(0.35))
-                        .frame(width: 8, height: 8)
+                    LedDot(on: session.peerIsOnline(in: group.id))
                         .accessibilityLabel(onlineLabel)
                 }
-                Text(group.name)
-                    .font(.headline)
+                ChannelTitle(
+                    code: ChannelCode.label(id: group.id, groups: session.groups),
+                    name: group.name
+                )
                 if group.locked {
                     Image(systemName: "lock.fill")
                         .font(.caption.weight(.semibold))
@@ -875,8 +915,7 @@ private struct GroupRow: View {
             MemberList(session: session, groupID: group.id)
             PresenceCaption(text: session.presenceCaption(for: group.id))
         }
-        .padding(12)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .auroraCard()
         .confirmationDialog(directTitle, isPresented: $confirmDirect, titleVisibility: .visible) {
             Button("Avslutt", role: .destructive, action: remove)
             Button("Avbryt", role: .cancel) {}
@@ -1203,7 +1242,7 @@ private struct PresenceCaption: View {
             EmptyView()
         } else {
             Text(text)
-                .font(.subheadline)
+                .font(.system(.subheadline, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -1215,14 +1254,14 @@ private struct MemberLine: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(Color.green)
-                .frame(width: 8, height: 8)
-                .accessibilityHidden(true)
+            LedDot(on: true)
             Text(label)
                 .font(nameFont)
                 .foregroundStyle(nameColor)
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial, in: Capsule())
     }
 
     private var label: String {
@@ -1230,71 +1269,18 @@ private struct MemberLine: View {
     }
 
     private var nameFont: Font {
-        member.talking ? .body.weight(.bold) : .body
+        if member.talking { return .system(.body, design: .monospaced).weight(.bold) }
+        return .system(.body, design: .monospaced)
     }
 
     private var nameColor: Color {
-        member.talking ? .orange : .primary
-    }
-}
-
-private struct WalkieBackdrop: View {
-    @Environment(\.colorScheme) private var colorScheme
-    var transmitting: Bool
-
-    var body: some View {
-        MeshGradient(
-            width: 3,
-            height: 3,
-            points: [
-                SIMD2(0, 0), SIMD2(0.5, 0), SIMD2(1, 0),
-                SIMD2(0, 0.55), SIMD2(0.5, 0.48), SIMD2(1, 0.58),
-                SIMD2(0, 1), SIMD2(0.5, 1), SIMD2(1, 1)
-            ],
-            colors: colors
-        )
-        .ignoresSafeArea()
-        .animation(.smooth(duration: 0.35), value: transmitting)
-    }
-
-    private var colors: [Color] {
-        if colorScheme == .dark {
-            if transmitting {
-                return [
-                    Color(white: 0.05), Color(red: 0.28, green: 0.03, blue: 0.04), Color(white: 0.07),
-                    Color(red: 0.20, green: 0.03, blue: 0.05), Color(red: 0.62, green: 0.06, blue: 0.08), Color(red: 0.18, green: 0.03, blue: 0.04),
-                    Color(white: 0.04), Color(red: 0.24, green: 0.04, blue: 0.05), Color(white: 0.06)
-                ]
-            }
-            return [
-                Color(white: 0.07), Color(white: 0.09), Color(red: 0.16, green: 0.08, blue: 0.09),
-                Color(white: 0.06), Color(red: 0.18, green: 0.08, blue: 0.09), Color(white: 0.08),
-                Color(white: 0.05), Color(white: 0.10), Color(red: 0.11, green: 0.07, blue: 0.09)
-            ]
-        }
-        if transmitting {
-            return [
-                Color(red: 1, green: 0.94, blue: 0.92), Color(red: 1, green: 0.78, blue: 0.74), Color(red: 1, green: 0.91, blue: 0.89),
-                Color(red: 1, green: 0.84, blue: 0.81), Color(red: 1, green: 0.48, blue: 0.44), Color(red: 1, green: 0.82, blue: 0.79),
-                Color(red: 0.98, green: 0.93, blue: 0.94), Color(red: 1, green: 0.86, blue: 0.84), Color(red: 0.97, green: 0.91, blue: 0.93)
-            ]
-        }
-        return [
-            Color(red: 0.96, green: 0.95, blue: 0.98), Color(red: 1, green: 0.94, blue: 0.93), Color(red: 0.99, green: 0.90, blue: 0.90),
-            Color(red: 0.93, green: 0.94, blue: 0.99), Color(red: 1, green: 0.89, blue: 0.87), Color(red: 0.96, green: 0.93, blue: 0.97),
-            Color(red: 0.90, green: 0.93, blue: 0.97), Color(red: 0.97, green: 0.94, blue: 0.95), Color(red: 0.94, green: 0.91, blue: 0.94)
-        ]
+        member.talking ? Aurora.violet : .primary
     }
 }
 
 private extension View {
     func glassFieldChrome() -> some View {
-        self
-            .textFieldStyle(.plain)
-            .tint(.red)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        auroraField()
     }
 }
 
