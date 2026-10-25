@@ -743,11 +743,19 @@ private struct TalkBottomBar: View {
                 action: onSpeaker
             )
             Button(action: onVolume) {
-                Text(volumeLabel)
-                    .font(.system(size: 20, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(volumeOpen ? Aurora.teal : .primary)
-                    .lineLimit(1)
-                    .frame(width: 80, height: 48)
+                VStack(spacing: 0) {
+                    Text(session.t(.volume))
+                        .font(.system(size: 10, weight: .semibold))
+                        .textCase(.uppercase)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .frame(height: 11)
+                    Text(volumeLabel)
+                        .font(.system(size: 20, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(volumeOpen ? Aurora.teal : .primary)
+                        .lineLimit(1)
+                }
+                .frame(width: 80, height: 48)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(session.t(.incomingVolume))

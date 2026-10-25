@@ -128,6 +128,7 @@ enum LKey {
     case listenEarpiece
     case listenMuted
     case incomingVolume
+    case volume
     case addContact
     case connect
     case cancel
@@ -257,6 +258,7 @@ enum L10n {
         case .listenEarpiece: return english ? "Earpiece" : "Øretelefon"
         case .listenMuted: return english ? "Muted" : "Dempet"
         case .incomingVolume: return english ? "Incoming volume" : "Innkommende volum"
+        case .volume: return english ? "Volume" : "Volum"
         case .addContact: return english ? "Add" : "Legg til"
         case .connect: return english ? "Connect" : "Koble til"
         case .cancel: return english ? "Cancel" : "Avbryt"
