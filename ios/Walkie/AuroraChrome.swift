@@ -589,10 +589,34 @@ struct LedDot: View {
     }
 }
 
+struct TalkNetWordmark: View {
+    var mark: CGFloat = 28
+    var titleFont: Font = .title3.weight(.semibold)
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image("TalkNetLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: mark, height: mark)
+                .clipShape(RoundedRectangle(cornerRadius: mark * 0.22, style: .continuous))
+            Text("TalkNet")
+                .font(titleFont)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("TalkNet")
+    }
+}
+
 struct TuningReadout: View {
     var code: String
     var name: String
     var mode: String
+    var transmittingLabel: String
+    var receivingLabel: String
+    var hint: String
     var action: () -> Void
     @State private var settling = false
 
@@ -614,7 +638,7 @@ struct TuningReadout: View {
                         .font(.system(.caption2, design: .monospaced).weight(.bold))
                         .foregroundStyle(mode == "TX" ? Aurora.teal : Aurora.violet)
                         .fixedSize()
-                        .accessibilityLabel(mode == "TX" ? "Sender" : "Mottar")
+                        .accessibilityLabel(mode == "TX" ? transmittingLabel : receivingLabel)
                 }
                 Image(systemName: "chevron.down")
                     .font(.caption.weight(.semibold))
@@ -629,7 +653,7 @@ struct TuningReadout: View {
         .opacity(settling ? 0.4 : 1)
         .animation(.easeOut(duration: 0.28), value: settling)
         .onChange(of: code) { _, _ in retune() }
-        .accessibilityHint("Åpner innstillinger")
+        .accessibilityHint(hint)
     }
 
     private func retune() {

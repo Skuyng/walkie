@@ -20,6 +20,8 @@
 		A1000000000000000000000B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* Assets.xcassets */; };
 		A1000000000000000000000D /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* PrivacyInfo.xcprivacy */; };
 		A1000000000000000000000E /* AuroraChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* AuroraChrome.swift */; };
+		A1000000000000000000000F /* L10n.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* L10n.swift */; };
+		A10000000000000000000010 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* InfoPlist.strings */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -37,6 +39,9 @@
 		A2000000000000000000000B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A2000000000000000000000D /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		A2000000000000000000000E /* AuroraChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuroraChrome.swift; sourceTree = "<group>"; };
+		A2000000000000000000000F /* L10n.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = L10n.swift; sourceTree = "<group>"; };
+		A20000000000000000000011 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A20000000000000000000012 /* nb */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = nb; path = nb.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		A30000000000000000000001 /* Walkie.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Walkie.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -67,6 +72,8 @@
 			children = (
 				A20000000000000000000001 /* WalkieApp.swift */,
 				A2000000000000000000000E /* AuroraChrome.swift */,
+				A2000000000000000000000F /* L10n.swift */,
+				A20000000000000000000010 /* InfoPlist.strings */,
 				A20000000000000000000002 /* ContentView.swift */,
 				A20000000000000000000003 /* WalkieSession.swift */,
 				A20000000000000000000004 /* WalkieSocket.swift */,
@@ -160,6 +167,7 @@
 			files = (
 				A1000000000000000000000B /* Assets.xcassets in Resources */,
 				A1000000000000000000000D /* PrivacyInfo.xcprivacy in Resources */,
+				A10000000000000000000010 /* InfoPlist.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -172,6 +180,7 @@
 			files = (
 				A10000000000000000000001 /* WalkieApp.swift in Sources */,
 				A1000000000000000000000E /* AuroraChrome.swift in Sources */,
+				A1000000000000000000000F /* L10n.swift in Sources */,
 				A10000000000000000000002 /* ContentView.swift in Sources */,
 				A10000000000000000000003 /* WalkieSession.swift in Sources */,
 				A10000000000000000000004 /* WalkieSocket.swift in Sources */,
@@ -183,6 +192,18 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXVariantGroup section */
+		A20000000000000000000010 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				A20000000000000000000011 /* en */,
+				A20000000000000000000012 /* nb */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
 		AA0000000000000000000001 /* Debug */ = {

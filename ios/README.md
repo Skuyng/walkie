@@ -23,7 +23,7 @@ Du trenger en Mac med Xcode 26 og en iPhone med iOS 26 eller nyere. En betalt ut
 11. Trykk **Run** (▶). Første bygging tar litt tid. Telefonen må være ulåst.
 12. Hvis appen ikke starter fordi utvikleren ikke er klarert: på iPhone, **Innstillinger → Generelt → VPN og enhetsadministrasjon** (på noen versjoner heter det **Enhetsadministrasjon**). Velg profilen din og trykk **Stol på**.
 13. Åpne TalkNet. Innloggingsvinduet viser **TalkNet**, brukernavn, passord og **Logg inn**. **Opprett bruker** åpner registrering, der vilkårene må godtas. **Personvern** ligger på innloggingen. Et lagret token hopper over innlogging.
-14. Etter innlogging er Talk-knappen midt på skjermen. Tannhjulet åpner **Innstillinger**: Grupper, Kontakter, Konto og Om. Trykk **Koble til** nederst. Tillat mikrofon når iOS spør. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe. **Logg ut** går tilbake til innlogging.
+14. Etter innlogging er Talk-knappen midt på skjermen. Tannhjulet åpner **Innstillinger**: Språk, Grupper, Kontakter, Ikke forstyrr, Konto og Om. Trykk **Koble til** nederst. Tillat mikrofon når iOS spør. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe. **Logg ut** går tilbake til innlogging.
 
 En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xcode på nytt. Et personlig team kan bare ha noen få egne apper installert samtidig.
 
@@ -50,6 +50,7 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Server** — `wss://walkie-bc0z.onrender.com` som standard. `https://` gjøres om til `wss://`, og `http://` til `ws://`. Tomt felt bruker standardadressen.
 - **Hold for å snakke** — lyd sendes bare mens knappen holdes inne.
 - **Volum opp** — hold inne for å snakke, og slipp for å stoppe, mens appen er tilkoblet og i forgrunnen. Lydnivået settes tilbake etter at du slipper. Systemets volumvisning skjules i vanlig visning og i mørk modus.
+- **Språk** — Norsk eller English under Innstillinger. Første gang følges telefonen; ellers blir det norsk. Valget lagres og gjelder med en gang, uten omstart. Talk-knappen heter Talk på begge språk. Systemets mikrofon-spørsmål følger telefonens språk.
 - **Høyttaler** — på som standard. På sender lyden i høyttaleren. Av bruker ørepluggen, med mindre hodetelefoner eller Bluetooth er koblet til. Valget lagres på telefonen.
 - **Mørk modus** — svart skjerm, lav lysstyrke, og telefonen holder seg våken. Et svakt rødt punkt vises mens du sender. Trykk skjermen for å avslutte. Volum opp virker her også.
 - Når noen andre begynner å snakke, spilles en kort tone, og navnet pulserer. Når de slipper, hører du en myk synkende tone.

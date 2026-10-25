@@ -24,6 +24,7 @@ struct ContentView: View {
         .persistentSystemOverlays(darkMode ? .hidden : .automatic)
         .preferredColorScheme(.dark)
         .tint(Aurora.teal)
+        .environment(\.locale, session.language.locale)
         .task {
             while !Task.isCancelled {
                 session.haptics.prepare()
@@ -68,10 +69,10 @@ struct ContentView: View {
                     AuroraBackground(live: auroraLive)
                 }
         }
-        .alert(session.suggestsSettings ? "Mikrofon" : "Obs", isPresented: errorPresented) {
-            Button("OK", role: .cancel) {}
+        .alert(session.suggestsSettings ? session.t(.microphone) : session.t(.headsUp), isPresented: errorPresented) {
+            Button(session.t(.ok), role: .cancel) {}
             if session.suggestsSettings {
-                Button("Åpne Innstillinger") {
+                Button(session.t(.openSettings)) {
                     if let url = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(url)
                     }
@@ -95,7 +96,7 @@ struct ContentView: View {
                         HomePresence(session: session)
                         Spacer(minLength: 0)
                         TalkBottomBar(
-                            speakerOn: session.speakerphone,
+                            session: session,
                             link: linkAction,
                             onSpeaker: toggleSpeaker,
                             onDark: enterDarkMode,
@@ -120,12 +121,19 @@ struct ContentView: View {
 
     private var homeTopBar: some View {
         ZStack {
-            TuningReadout(code: talkCode, name: channelName, mode: radioMode, action: openMenu)
+            TuningReadout(
+                code: talkCode,
+                name: channelName,
+                mode: radioMode,
+                transmittingLabel: session.t(.transmitting),
+                receivingLabel: session.t(.receiving),
+                hint: session.t(.opensSettings),
+                action: openMenu
+            )
                 .fixedSize(horizontal: true, vertical: false)
             HStack(spacing: 8) {
-                Text("TalkNet")
-                    .font(.title3.weight(.semibold))
-                    .lineLimit(1)
+                TalkNetWordmark(mark: 28, titleFont: .title3.weight(.semibold))
+                    .allowsHitTesting(false)
                 Spacer(minLength: 8)
                 profileButton
             }
@@ -149,7 +157,7 @@ struct ContentView: View {
                 }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Innstillinger")
+        .accessibilityLabel(session.t(.settings))
     }
 
     private var hasAttention: Bool {
@@ -203,7 +211,7 @@ struct ContentView: View {
     private var channelName: String {
         let match = session.groups.first { $0.id == session.talkGroup }
         let label = match?.name ?? session.room
-        if label.isEmpty { return "Ingen gruppe" }
+        if label.isEmpty { return session.t(.noGroup) }
         return label
     }
 
@@ -226,8 +234,8 @@ struct ContentView: View {
         .onTapGesture { exitDarkMode() }
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(session.isTalking ? "Mørk modus. Snakker." : "Mørk modus")
-        .accessibilityHint("Trykk for å avslutte")
+        .accessibilityLabel(session.isTalking ? session.t(.darkTalking) : session.t(.darkMode))
+        .accessibilityHint(session.t(.tapToExit))
         .accessibilityAction { exitDarkMode() }
     }
 
@@ -338,7 +346,7 @@ private struct TalkButton: View {
             .accessibilityElement(children: .ignore)
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel("Talk")
-            .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe. Hold volum opp inne for å snakke. Hodetelefonens avspillingsknapp veksler sending.")
+            .accessibilityHint(session.t(.talkHint))
             .accessibilityAction {
                 if session.isTalking {
                     session.endTransmitting()
@@ -453,7 +461,7 @@ private struct HomePresence: View {
                 if session.linkState == .connected && !members.isEmpty {
                     HStack(spacing: -8) {
                         ForEach(shownMembers) { member in
-                            PresenceFace(member: member)
+                            PresenceFace(member: member, talkingLabel: session.tf(.nameTalking, member.name))
                         }
                     }
                     Text(countText)
@@ -477,7 +485,7 @@ private struct HomePresence: View {
             if let clip = session.heardClip(in: session.talkGroup) {
                 HStack {
                     Spacer(minLength: 0)
-                    ReplayButton(sender: clip.sender, at: clip.at) {
+                    ReplayButton(label: session.tf(.replayFrom, clip.sender, clip.at.formatted(date: .omitted, time: .shortened))) {
                         session.replayLast(in: session.talkGroup)
                     }
                 }
@@ -509,7 +517,7 @@ private struct HomePresence: View {
     }
 
     private var idleText: String {
-        if session.linkState == .connected { return "Ingen pålogget" }
+        if session.linkState == .connected { return session.t(.nobodyOnline) }
         return session.statusText
     }
 }
@@ -534,8 +542,7 @@ private struct SpeakingName: View {
 }
 
 private struct ReplayButton: View {
-    var sender: String
-    var at: Date
+    var label: String
     var action: () -> Void
 
     var body: some View {
@@ -552,7 +559,7 @@ private struct ReplayButton: View {
                 }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Spill av siste melding fra \(sender), \(at.formatted(date: .omitted, time: .shortened))")
+        .accessibilityLabel(label)
     }
 }
 
@@ -581,6 +588,7 @@ private struct LinkDot: View {
 
 private struct PresenceFace: View {
     let member: OnlineMember
+    var talkingLabel: String
 
     var body: some View {
         Text(initial)
@@ -594,7 +602,7 @@ private struct PresenceFace: View {
                     Circle().strokeBorder(Aurora.teal, lineWidth: 1.5)
                 }
             }
-            .accessibilityLabel(member.talking ? "\(member.name) snakker" : member.name)
+            .accessibilityLabel(member.talking ? talkingLabel : member.name)
     }
 
     private var initial: String {
@@ -605,7 +613,7 @@ private struct PresenceFace: View {
 }
 
 private struct TalkBottomBar: View {
-    var speakerOn: Bool
+    @ObservedObject var session: WalkieSession
     var link: HomeLink
     var onSpeaker: () -> Void
     var onDark: () -> Void
@@ -619,17 +627,17 @@ private struct TalkBottomBar: View {
                 tint: speakerTint,
                 action: onSpeaker
             )
-            TalkIconButton(systemImage: "moon.fill", title: "Mørk modus", tint: .primary, action: onDark)
+            TalkIconButton(systemImage: "moon.fill", title: session.t(.darkMode), tint: .primary, action: onDark)
             if link == .connect {
                 Button(action: onLink) {
-                    Text("Koble til")
+                    Text(session.t(.connect))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Aurora.teal)
                         .padding(.horizontal, 16)
                         .frame(height: 48)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Koble til")
+                .accessibilityLabel(session.t(.connect))
             } else {
                 TalkIconButton(systemImage: linkIcon, title: linkTitle, tint: linkTint, action: onLink)
             }
@@ -638,6 +646,10 @@ private struct TalkBottomBar: View {
         .padding(.vertical, 8)
         .glassEffect(.regular, in: Capsule())
         .accessibilityElement(children: .contain)
+    }
+
+    private var speakerOn: Bool {
+        session.speakerphone
     }
 
     private var speakerIcon: String {
@@ -649,7 +661,7 @@ private struct TalkBottomBar: View {
     }
 
     private var speakerTitle: String {
-        speakerOn ? "Høyttaler på" : "Høyttaler av"
+        speakerOn ? session.t(.speakerOn) : session.t(.speakerOff)
     }
 
     private var linkIcon: String {
@@ -666,11 +678,11 @@ private struct TalkBottomBar: View {
     private var linkTitle: String {
         switch link {
         case .connect:
-            return "Koble til"
+            return session.t(.connect)
         case .cancel:
-            return "Avbryt"
+            return session.t(.cancel)
         case .disconnect:
-            return "Koble fra"
+            return session.t(.disconnect)
         }
     }
 
@@ -713,24 +725,37 @@ private struct HomeMenu: View {
             ScrollView {
                 GlassEffectContainer(spacing: 16) {
                     VStack(alignment: .leading, spacing: 24) {
-                        SettingsBlock("Grupper") {
+                        SettingsBlock(session.t(.language)) {
+                            Picker(session.t(.language), selection: language) {
+                                Text("Norsk").tag(AppLanguage.nb)
+                                Text("English").tag(AppLanguage.en)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                        }
+                        SettingsBlock(session.t(.groups)) {
                             GroupEditor(session: session)
                         }
-                        SettingsBlock("Kontakter") {
+                        SettingsBlock(session.t(.contacts)) {
                             DirectSection(session: session)
                         }
-                        SettingsBlock("Ikke forstyrr") {
+                        SettingsBlock(session.t(.quietHours)) {
                             QuietHoursSection(session: session)
                         }
-                        SettingsBlock("Konto") {
+                        SettingsBlock(session.t(.account)) {
                             VStack(alignment: .leading, spacing: 16) {
                                 accountHeader
                                 AccountFooter(session: session, onLogOut: logOut)
                             }
                         }
-                        SettingsBlock("Om") {
+                        SettingsBlock(session.t(.about)) {
                             VStack(alignment: .leading, spacing: 16) {
-                                LegalLinks(server: session.serverURL)
+                                TalkNetWordmark(mark: 28, titleFont: .title3.weight(.semibold))
+                                LegalLinks(
+                                    server: session.serverURL,
+                                    privacyTitle: session.t(.privacy),
+                                    termsTitle: session.t(.terms)
+                                )
                                 serverField
                                 Text("Created by ™ Skutle")
                                     .font(.caption)
@@ -745,11 +770,11 @@ private struct HomeMenu: View {
             }
             .scrollContentBackground(.hidden)
             .scrollDismissesKeyboard(.interactively)
-            .navigationTitle("Innstillinger")
+            .navigationTitle(session.t(.settings))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Ferdig") { dismiss() }
+                    Button(session.t(.done)) { dismiss() }
                 }
             }
         }
@@ -770,6 +795,13 @@ private struct HomeMenu: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var language: Binding<AppLanguage> {
+        Binding(
+            get: { session.language },
+            set: { session.setLanguage($0) }
+        )
+    }
+
     private var displayName: String {
         if session.name.isEmpty { return session.accountUsername }
         return session.name
@@ -777,7 +809,7 @@ private struct HomeMenu: View {
 
     private var serverField: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Server")
+            Text(session.t(.server))
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
             TextField(WalkieSession.defaultServerURL, text: $session.serverURL)
@@ -801,13 +833,13 @@ private struct QuietHoursSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Ikke forstyrr", isOn: enabled)
+            Toggle(session.t(.quietHours), isOn: enabled)
                 .font(.body.weight(.semibold))
-            DatePicker("Fra", selection: fromDate, displayedComponents: .hourAndMinute)
+            DatePicker(session.t(.fromTime), selection: fromDate, displayedComponents: .hourAndMinute)
                 .font(.subheadline.weight(.semibold))
-            DatePicker("Til", selection: toDate, displayedComponents: .hourAndMinute)
+            DatePicker(session.t(.toTime), selection: toDate, displayedComponents: .hourAndMinute)
                 .font(.subheadline.weight(.semibold))
-            Text("Slå på for å dempe innkommende lyd \(session.quietHoursLabel). Navnet vises fortsatt.")
+            Text(session.tf(.quietCaption, session.quietHoursLabel))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -895,8 +927,8 @@ private struct LoginWindow: View {
         GlassEffectContainer(spacing: 16) {
             VStack(alignment: .leading, spacing: 16) {
                 logo
-                    labeledField("Brukernavn") {
-                        TextField("brukernavn", text: $username)
+                    labeledField(session.t(.username)) {
+                        TextField(session.t(.usernamePlaceholder), text: $username)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .textContentType(.username)
@@ -905,8 +937,8 @@ private struct LoginWindow: View {
                             .onSubmit { focus = .password }
                             .glassFieldChrome()
                     }
-                    labeledField("Passord") {
-                        SecureField("Minst 4 tegn", text: $password)
+                    labeledField(session.t(.password)) {
+                        SecureField(session.t(.passwordPlaceholder), text: $password)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .textContentType(.password)
@@ -916,7 +948,7 @@ private struct LoginWindow: View {
                             .glassFieldChrome()
                     }
                     Button(action: logIn) {
-                        Text("Logg inn")
+                        Text(session.t(.signIn))
                             .font(.title3.weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
@@ -925,21 +957,21 @@ private struct LoginWindow: View {
                     .tint(Aurora.teal)
                     .controlSize(.large)
                     .disabled(busy)
-                    Button("Opprett bruker", action: { showSignUp = true })
+                    Button(session.t(.createUser), action: { showSignUp = true })
                         .buttonStyle(.plain)
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                    Button("Personvern", action: openPrivacy)
+                    Button(session.t(.privacy), action: openPrivacy)
                         .buttonStyle(.plain)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity)
                     if busy {
-                        Text("Logger inn…")
+                        Text(session.t(.signingIn))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
-                        Button("Avbryt") { session.cancelAccountConnect() }
+                        Button(session.t(.cancel)) { session.cancelAccountConnect() }
                             .buttonStyle(.glass)
                             .frame(maxWidth: .infinity)
                     }
@@ -956,8 +988,7 @@ private struct LoginWindow: View {
                 .frame(width: 96, height: 96)
                 .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                 .shadow(color: Color(red: 62 / 255, green: 230 / 255, blue: 208 / 255).opacity(0.45), radius: 18, y: 4)
-            Text("TalkNet")
-                .font(.largeTitle.weight(.bold))
+            TalkNetWordmark(mark: 28, titleFont: .largeTitle.weight(.bold))
         }
         .frame(maxWidth: .infinity)
         .padding(.bottom, 16)
@@ -1004,14 +1035,14 @@ private struct SignUpWindow: View {
             GlassEffectContainer(spacing: 16) {
                 VStack(alignment: .leading, spacing: 16) {
                     Button(action: onClose) {
-                        Label("Tilbake", systemImage: "chevron.left")
+                        Label(session.t(.back), systemImage: "chevron.left")
                             .font(.subheadline.weight(.semibold))
                     }
                     .buttonStyle(.plain)
-                    Text("Opprett bruker")
+                    Text(session.t(.createUser))
                         .font(.title2.weight(.semibold))
-                    labeledField("Brukernavn") {
-                        TextField("brukernavn", text: $username)
+                    labeledField(session.t(.username)) {
+                        TextField(session.t(.usernamePlaceholder), text: $username)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .textContentType(.username)
@@ -1020,8 +1051,8 @@ private struct SignUpWindow: View {
                             .onSubmit { focus = .displayName }
                             .glassFieldChrome()
                     }
-                    labeledField("Visningsnavn") {
-                        TextField("Navnet andre ser", text: $displayName)
+                    labeledField(session.t(.displayName)) {
+                        TextField(session.t(.displayNamePlaceholder), text: $displayName)
                             .textContentType(.name)
                             .textInputAutocapitalization(.words)
                             .submitLabel(.next)
@@ -1029,8 +1060,8 @@ private struct SignUpWindow: View {
                             .onSubmit { focus = .password }
                             .glassFieldChrome()
                     }
-                    labeledField("Passord") {
-                        SecureField("Minst 4 tegn", text: $password)
+                    labeledField(session.t(.password)) {
+                        SecureField(session.t(.passwordPlaceholder), text: $password)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .textContentType(.newPassword)
@@ -1039,11 +1070,15 @@ private struct SignUpWindow: View {
                             .onSubmit(signUp)
                             .glassFieldChrome()
                     }
-                    Toggle("Jeg godtar vilkårene", isOn: $acceptedTerms)
+                    Toggle(session.t(.acceptTermsToggle), isOn: $acceptedTerms)
                         .tint(Aurora.teal)
-                    LegalLinks(server: session.serverURL)
+                    LegalLinks(
+                        server: session.serverURL,
+                        privacyTitle: session.t(.privacy),
+                        termsTitle: session.t(.terms)
+                    )
                     Button(action: signUp) {
-                        Text("Opprett bruker")
+                        Text(session.t(.createUser))
                             .font(.title3.weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
@@ -1053,11 +1088,11 @@ private struct SignUpWindow: View {
                     .controlSize(.large)
                     .disabled(busy || !acceptedTerms)
                     if busy {
-                        Text("Oppretter konto…")
+                        Text(session.t(.creatingAccount))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
-                        Button("Avbryt") { session.cancelAccountConnect() }
+                        Button(session.t(.cancel)) { session.cancelAccountConnect() }
                             .buttonStyle(.glass)
                             .frame(maxWidth: .infinity)
                     }
@@ -1106,18 +1141,18 @@ private struct GroupEditor: View {
 
     private var groupFields: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TextField("Gruppenavn (f.eks. Familie)", text: $draftName)
+            TextField(session.t(.groupNamePlaceholder), text: $draftName)
                 .textInputAutocapitalization(.words)
                 .autocorrectionDisabled()
                 .submitLabel(.done)
                 .glassFieldChrome()
-            SecureField("Passord (valgfritt)", text: $draftPassword)
+            SecureField(session.t(.optionalPassword), text: $draftPassword)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .textContentType(.password)
                 .glassFieldChrome()
             HStack(spacing: 8) {
-                CapsuleChoice(title: "Opprett gruppe", prominent: true, height: 48, expands: true, action: createTapped)
+                CapsuleChoice(title: session.t(.createGroup), prominent: true, height: 48, expands: true, action: createTapped)
                 CapsuleChoice(title: joinTitle, prominent: false, height: 48, expands: true, action: joinTapped)
             }
             .frame(maxWidth: .infinity)
@@ -1126,7 +1161,7 @@ private struct GroupEditor: View {
     }
 
     private var joinTitle: String {
-        draftPassword.isEmpty ? "Be om å bli med" : "Bli med"
+        draftPassword.isEmpty ? session.t(.askToJoin) : session.t(.join)
     }
 
     private func createTapped() {
@@ -1156,7 +1191,7 @@ private struct InviteSection: View {
             EmptyView()
         } else {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Invitasjoner")
+                Text(session.t(.invites))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 ForEach(session.invites) { invite in
@@ -1179,10 +1214,10 @@ private struct InviteRow: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
-                Button("Godta") { session.replyInvite(room: invite.room, accept: true) }
+                Button(session.t(.accept)) { session.replyInvite(room: invite.room, accept: true) }
                 .buttonStyle(.glassProminent)
                 .tint(Aurora.teal)
-            Button("Avslå") { session.replyInvite(room: invite.room, accept: false) }
+            Button(session.t(.decline)) { session.replyInvite(room: invite.room, accept: false) }
                     .buttonStyle(.glass)
             }
         }
@@ -1191,8 +1226,8 @@ private struct InviteRow: View {
     }
 
     private var fromLine: String {
-        if invite.fromName.isEmpty { return "Invitasjon" }
-        return "Fra \(invite.fromName)"
+        if invite.fromName.isEmpty { return session.t(.invitation) }
+        return session.tf(.fromPerson, invite.fromName)
     }
 }
 
@@ -1239,7 +1274,7 @@ private struct DirectSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 8) {
-                TextField("Brukernavn", text: $username)
+                TextField(session.t(.username), text: $username)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.send)
@@ -1251,7 +1286,7 @@ private struct DirectSection: View {
                         }
                     }
                 CapsuleChoice(
-                    title: "Søk bruker",
+                    title: session.t(.searchUser),
                     prominent: false,
                     height: fieldHeight,
                     expands: false,
@@ -1289,13 +1324,13 @@ private struct DirectRequestRow: View {
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
                 if request.incoming {
-                    Button("Godta") { session.replyDirect(username: request.username, accept: true) }
+                    Button(session.t(.accept)) { session.replyDirect(username: request.username, accept: true) }
                         .buttonStyle(.glassProminent)
                         .tint(Aurora.teal)
-                    Button("Avslå") { session.replyDirect(username: request.username, accept: false) }
+                    Button(session.t(.decline)) { session.replyDirect(username: request.username, accept: false) }
                         .buttonStyle(.glass)
                 } else {
-                    Button("Avbryt") { session.replyDirect(username: request.username, accept: false) }
+                    Button(session.t(.cancel)) { session.replyDirect(username: request.username, accept: false) }
                         .buttonStyle(.glass)
                 }
             }
@@ -1310,11 +1345,11 @@ private struct DirectRequestRow: View {
     }
 
     private var headline: String {
-        request.incoming ? person : "Venter på \(person)"
+        request.incoming ? person : session.tf(.waitingFor, person)
     }
 
     private var detail: String {
-        request.incoming ? "Vil snakke direkte" : "Forespørselen er sendt"
+        request.incoming ? session.t(.wantsDirect) : session.t(.requestSent)
     }
 }
 
@@ -1350,10 +1385,10 @@ private struct GroupRow: View {
                 if group.locked {
                     Image(systemName: "lock.fill")
                         .font(.caption.weight(.semibold))
-                        .accessibilityLabel("Passord")
+                        .accessibilityLabel(session.t(.password))
                 }
                 if group.admin {
-                    Text("admin")
+                    Text(session.t(.adminBadge))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }
@@ -1365,14 +1400,14 @@ private struct GroupRow: View {
                         .font(.body.weight(.semibold))
                 }
                 .buttonStyle(.glass)
-                .accessibilityLabel("Fjern \(group.name)")
+                .accessibilityLabel(session.tf(.removeNamed, group.name))
             }
-            Toggle("Lytt", isOn: listenBinding)
+            Toggle(session.t(.listen), isOn: listenBinding)
             if group.direct && !group.peer.isEmpty {
                 HStack(spacing: 8) {
                     Button(blockTitle) { session.setBlocked(group.peer, !session.isBlocked(group.peer)) }
                         .buttonStyle(.glass)
-                    Button("Rapporter") { confirmReport = true }
+                    Button(session.t(.report)) { confirmReport = true }
                         .buttonStyle(.glass)
                 }
             }
@@ -1388,25 +1423,25 @@ private struct GroupRow: View {
         }
         .auroraCard()
         .confirmationDialog(directTitle, isPresented: $confirmDirect, titleVisibility: .visible) {
-            Button("Avslutt", role: .destructive, action: remove)
-            Button("Avbryt", role: .cancel) {}
+            Button(session.t(.endDirect), role: .destructive, action: remove)
+            Button(session.t(.cancel), role: .cancel) {}
         } message: {
-            Text("Kanalen slettes for begge.")
+            Text(session.t(.channelDeletesBoth))
         }
         .alert(reportTitle, isPresented: $confirmReport) {
-            Button("Send", action: reportPeer)
-            Button("Avbryt", role: .cancel) {}
+            Button(session.t(.send), action: reportPeer)
+            Button(session.t(.cancel), role: .cancel) {}
         } message: {
-            Text("Rapporten lagres hos serveren. Misbruk tåles ikke.")
+            Text(session.t(.reportStored))
         }
     }
 
     private var blockTitle: String {
-        session.isBlocked(group.peer) ? "Opphev blokkering" : "Blokker"
+        session.isBlocked(group.peer) ? session.t(.unblock) : session.t(.block)
     }
 
     private var reportTitle: String {
-        "Rapportere \(group.name)?"
+        session.tf(.reportAsk, group.name)
     }
 
     private func reportPeer() {
@@ -1414,15 +1449,15 @@ private struct GroupRow: View {
     }
 
     private var onlineLabel: String {
-        session.peerIsOnline(in: group.id) ? "Pålogget" : "Ikke pålogget"
+        session.peerIsOnline(in: group.id) ? session.t(.online) : session.t(.offline)
     }
 
     private var directTitle: String {
-        "Avslutte direkte med \(group.name)?"
+        session.tf(.endDirectAsk, group.name)
     }
 
     private var talkTitle: String {
-        session.talkGroup == group.id ? "Talk" : "Velg"
+        session.talkGroup == group.id ? "Talk" : session.t(.select)
     }
 
     private var listenBinding: Binding<Bool> {
@@ -1458,13 +1493,13 @@ private struct AdminTools: View {
         VStack(alignment: .leading, spacing: 8) {
             PasswordEditor(session: session, groupID: group.id, locked: group.locked)
             HStack(spacing: 8) {
-                TextField("Brukernavn", text: $inviteName)
+                TextField(session.t(.username), text: $inviteName)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.send)
                     .onSubmit(invite)
                     .glassFieldChrome()
-                Button("Invitér", action: invite)
+                Button(session.t(.invite), action: invite)
                     .buttonStyle(.glass)
             }
             ForEach(pendingRequests) { request in
@@ -1499,10 +1534,10 @@ private struct PasswordEditor: View {
                 .onSubmit(save)
                 .glassFieldChrome()
             HStack(spacing: 8) {
-                Button("Lagre passord", action: save)
+                Button(session.t(.savePassword), action: save)
                     .buttonStyle(.glass)
                 if locked {
-                    Button("Fjern passord", action: clear)
+                    Button(session.t(.removePassword), action: clear)
                         .buttonStyle(.glass)
                 }
             }
@@ -1510,7 +1545,7 @@ private struct PasswordEditor: View {
     }
 
     private var placeholder: String {
-        locked ? "Nytt passord" : "Passord (valgfritt)"
+        locked ? session.t(.newPassword) : session.t(.optionalPassword)
     }
 
     private func save() {
@@ -1534,17 +1569,17 @@ private struct RequestRow: View {
             Text(requestLabel)
                 .font(.subheadline.weight(.semibold))
             HStack(spacing: 8) {
-                Button("Godta") { session.replyRequest(room: request.room, username: request.username, accept: true) }
+                Button(session.t(.accept)) { session.replyRequest(room: request.room, username: request.username, accept: true) }
                     .buttonStyle(.glassProminent)
                     .tint(.red)
-                Button("Avslå") { session.replyRequest(room: request.room, username: request.username, accept: false) }
+                Button(session.t(.decline)) { session.replyRequest(room: request.room, username: request.username, accept: false) }
                     .buttonStyle(.glass)
             }
         }
     }
 
     private var requestLabel: String {
-        "\(request.displayName) (@\(request.username)) ber om å bli med"
+        session.tf(.asksToJoin, "\(request.displayName) (@\(request.username))")
     }
 }
 
@@ -1577,39 +1612,39 @@ private struct RosterLine: View {
                 if canModerate {
                     Button(blockTitle) { session.setBlocked(member.username, !session.isBlocked(member.username)) }
                         .buttonStyle(.glass)
-                    Button("Rapporter") { confirmReport = true }
+                    Button(session.t(.report)) { confirmReport = true }
                         .buttonStyle(.glass)
                 }
                 if canRemove {
-                    Button("Fjern") { confirmRemove = true }
+                    Button(session.t(.remove)) { confirmRemove = true }
                         .buttonStyle(.glass)
                 }
             }
         }
         .alert(reportTitle, isPresented: $confirmReport) {
-            Button("Send", action: report)
-            Button("Avbryt", role: .cancel) {}
+            Button(session.t(.send), action: report)
+            Button(session.t(.cancel), role: .cancel) {}
         } message: {
-            Text("Rapporten lagres hos serveren. Misbruk tåles ikke.")
+            Text(session.t(.reportStored))
         }
         .confirmationDialog(confirmTitle, isPresented: $confirmRemove, titleVisibility: .visible) {
-            Button("Fjern", role: .destructive, action: remove)
-            Button("Avbryt", role: .cancel) {}
+            Button(session.t(.remove), role: .destructive, action: remove)
+            Button(session.t(.cancel), role: .cancel) {}
         } message: {
-            Text("Medlemmet mister tilgang til gruppen.")
+            Text(session.t(.memberLosesAccess))
         }
     }
 
     private var reportTitle: String {
-        "Rapportere \(memberLine)?"
+        session.tf(.reportAsk, memberLine)
     }
 
     private var blockTitle: String {
-        session.isBlocked(member.username) ? "Opphev blokkering" : "Blokker"
+        session.isBlocked(member.username) ? session.t(.unblock) : session.t(.block)
     }
 
     private var confirmTitle: String {
-        "Fjerne \(memberLine)?"
+        session.tf(.removeAsk, memberLine)
     }
 
     private var memberLine: String {
@@ -1636,11 +1671,13 @@ private struct RosterLine: View {
 
 private struct LegalLinks: View {
     let server: String
+    var privacyTitle: String
+    var termsTitle: String
 
     var body: some View {
         HStack(spacing: 16) {
-            Button("Personvern") { open("/personvern") }
-            Button("Vilkår") { open("/vilkar") }
+            Button(privacyTitle) { open("/personvern") }
+            Button(termsTitle) { open("/vilkar") }
         }
         .buttonStyle(.plain)
         .font(.subheadline.weight(.semibold))
@@ -1660,19 +1697,19 @@ private struct AccountFooter: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Button("Logg ut", action: onLogOut)
+            Button(session.t(.logOut), action: onLogOut)
                 .buttonStyle(.glass)
                 .frame(maxWidth: .infinity)
-            Button("Slett konto") { confirmDelete = true }
+            Button(session.t(.deleteAccount)) { confirmDelete = true }
                 .buttonStyle(.glass)
                 .tint(.red)
                 .frame(maxWidth: .infinity)
         }
-        .confirmationDialog("Slette kontoen?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Slett konto", role: .destructive) { session.deleteAccount() }
-            Button("Avbryt", role: .cancel) {}
+        .confirmationDialog(session.t(.deleteAccountAsk), isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button(session.t(.deleteAccount), role: .destructive) { session.deleteAccount() }
+            Button(session.t(.cancel), role: .cancel) {}
         } message: {
-            Text("Brukeren, øktene og medlemskapene slettes. Grupper du eier alene slettes. Ellers får det eldste medlemmet admin. Dette kan ikke angres.")
+            Text(session.t(.deleteAccountBody))
         }
     }
 }
@@ -1684,7 +1721,7 @@ private struct MemberList: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(session.onlineMembers(in: groupID)) { member in
-                MemberLine(member: member)
+                MemberLine(member: member, talkingText: session.tf(.nameTalking, member.name))
             }
         }
     }
@@ -1722,6 +1759,7 @@ private struct PresenceCaption: View {
 
 private struct MemberLine: View {
     let member: OnlineMember
+    var talkingText: String
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1736,7 +1774,7 @@ private struct MemberLine: View {
     }
 
     private var label: String {
-        member.talking ? "\(member.name) snakker" : member.name
+        member.talking ? talkingText : member.name
     }
 
     private var nameFont: Font {

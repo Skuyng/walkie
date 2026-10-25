@@ -15,14 +15,14 @@ final class WalkieSession: ObservableObject {
     @Published var groups: [WalkieGroup]
     @Published var talkGroup: String
     @Published private(set) var linkState: LinkState = .disconnected
-    @Published private(set) var statusText = "Ikke tilkoblet"
+    @Published private(set) var statusCode: LinkCopy = .disconnected
     @Published private(set) var membersByRoom: [String: [RoomMember]] = [:]
     @Published private(set) var selfID = ""
     @Published private(set) var joinProblems: [String: String] = [:]
     @Published private(set) var talkers: [Talker] = []
     @Published private(set) var isTalking = false
     @Published private(set) var audioReady = false
-    @Published var errorMessage: String?
+    @Published private(set) var errorNotice: AppNotice?
     @Published private(set) var suggestsSettings = false
     @Published private(set) var hasConnectedOnce = false
     @Published var speakerphone: Bool
@@ -37,6 +37,28 @@ final class WalkieSession: ObservableObject {
     @Published var quietFromMinutes = 22 * 60
     @Published var quietToMinutes = 7 * 60
     @Published private(set) var heardClips: [String: HeardClip] = [:]
+    @Published private(set) var language: AppLanguage = .nb
+
+    var statusText: String {
+        L10n.text(statusCode.key, language)
+    }
+
+    var errorMessage: String? {
+        errorNotice.map { L10n.notice($0, language) }
+    }
+
+    func t(_ key: LKey) -> String {
+        L10n.text(key, language)
+    }
+
+    func tf(_ key: LKey, _ values: String...) -> String {
+        L10n.format(key, language, values)
+    }
+
+    func setLanguage(_ next: AppLanguage) {
+        language = next
+        defaults.set(next.rawValue, forKey: Key.language)
+    }
 
     var canTransmit: Bool {
         linkState == .connected && audioReady
@@ -61,22 +83,23 @@ final class WalkieSession: ObservableObject {
         let parts = order.compactMap { roomID -> String? in
             guard let names = namesByRoom[roomID], !names.isEmpty else { return nil }
             let label = groups.first { $0.id == roomID }?.name ?? roomID
-            return names.joined(separator: ", ") + " i " + label
+            return tf(.speakingIn, names.joined(separator: ", "), label)
         }
         if parts.isEmpty { return "" }
-        return parts.joined(separator: " · ") + " snakker"
+        return parts.joined(separator: " · ") + " " + t(.speakingTail)
     }
 
     var centerStatus: String {
         if linkState != .connected { return statusText }
         let count = onlineMembers(in: talkGroup).count
-        if count == 0 { return "Ingen pålogget" }
-        if count == 1 { return "1 pålogget" }
-        return "\(count) pålogget"
+        if count == 0 { return t(.nobodyOnline) }
+        if count == 1 { return t(.oneOnline) }
+        return tf(.manyOnline, "\(count)")
     }
 
     func joinProblem(for groupID: String) -> String {
-        joinProblems[groupID] ?? ""
+        guard let raw = joinProblems[groupID], !raw.isEmpty else { return "" }
+        return L10n.phrase(raw, language)
     }
 
     func onlineMembers(in groupID: String) -> [OnlineMember] {
@@ -98,7 +121,7 @@ final class WalkieSession: ObservableObject {
     func presenceCaption(for groupID: String) -> String {
         guard linkState == .connected else { return "" }
         if !joinProblem(for: groupID).isEmpty { return "" }
-        if onlineMembers(in: groupID).isEmpty { return "Ingen pålogget" }
+        if onlineMembers(in: groupID).isEmpty { return t(.nobodyOnline) }
         return ""
     }
 
@@ -161,6 +184,7 @@ final class WalkieSession: ObservableObject {
         serverURL = storedServer.isEmpty ? Self.defaultServerURL : storedServer
         accountUsername = defaults.string(forKey: Key.username) ?? ""
         speakerphone = defaults.object(forKey: Key.speakerphone) as? Bool ?? true
+        language = AppLanguage.resolved(stored: defaults.string(forKey: Key.language))
         quietHoursEnabled = defaults.bool(forKey: Key.quietEnabled)
         quietFromMinutes = Self.clampMinutes(defaults.object(forKey: Key.quietFrom) as? Int ?? (22 * 60))
         quietToMinutes = Self.clampMinutes(defaults.object(forKey: Key.quietTo) as? Int ?? (7 * 60))
@@ -193,14 +217,12 @@ final class WalkieSession: ObservableObject {
         engine.setCaptureHandler { [weak self] data in
             self?.socket.send(audio: data)
         }
-        engine.onFailure = { [weak self] message in
+        engine.onFailure = { [weak self] alert in
             Task { @MainActor in
                 guard let self else { return }
                 self.audioReady = false
                 let denied = AVAudioApplication.shared.recordPermission != .granted
-                self.errorMessage = denied
-                    ? VoiceEngineError.microphoneDenied.localizedDescription
-                    : message
+                self.errorNotice = .audio(denied ? .microphoneDenied : alert)
                 self.suggestsSettings = denied
             }
         }
@@ -218,7 +240,7 @@ final class WalkieSession: ObservableObject {
             accountToken = token
             keepAccount = true
             restoringSession = true
-            statusText = "Logger inn…"
+            statusCode = .signingIn
             linkState = .connecting
             openAccountSocket()
         }
@@ -264,7 +286,7 @@ final class WalkieSession: ObservableObject {
     func signUp(username rawUser: String, displayName rawDisplay: String, password rawPassword: String, acceptedTerms: Bool) {
         guard acceptedTerms else {
             suggestsSettings = false
-            errorMessage = "Du må godta vilkårene."
+            errorNotice = .key(.acceptTerms)
             return
         }
         let user = Self.normalizeUsername(rawUser)
@@ -272,17 +294,17 @@ final class WalkieSession: ObservableObject {
         let password = String(rawPassword.prefix(80))
         guard Self.validUsername(user) else {
             suggestsSettings = false
-            errorMessage = "Brukernavnet må være 3–20 tegn (a–z, 0–9)."
+            errorNotice = .key(.usernameRule)
             return
         }
         guard !display.isEmpty else {
             suggestsSettings = false
-            errorMessage = "Skriv et navn."
+            errorNotice = .key(.enterName)
             return
         }
         guard password.count >= 4 else {
             suggestsSettings = false
-            errorMessage = "Passordet må ha minst 4 tegn."
+            errorNotice = .key(.passwordRule)
             return
         }
         name = display
@@ -297,12 +319,12 @@ final class WalkieSession: ObservableObject {
         let password = String(rawPassword.prefix(80))
         guard Self.validUsername(user) else {
             suggestsSettings = false
-            errorMessage = "Brukernavnet må være 3–20 tegn (a–z, 0–9)."
+            errorNotice = .key(.usernameRule)
             return
         }
         guard password.count >= 4 else {
             suggestsSettings = false
-            errorMessage = "Passordet må ha minst 4 tegn."
+            errorNotice = .key(.passwordRule)
             return
         }
         pendingAuth = .login(user: user, password: password)
@@ -348,7 +370,7 @@ final class WalkieSession: ObservableObject {
         socketOpen = false
         socketReady = false
         linkState = .disconnected
-        statusText = "Ikke tilkoblet"
+        statusCode = .disconnected
     }
 
     @discardableResult
@@ -358,17 +380,17 @@ final class WalkieSession: ObservableObject {
         let secret = String(rawPassword.prefix(80))
         guard !id.isEmpty else {
             suggestsSettings = false
-            errorMessage = "Skriv et gruppenavn."
+            errorNotice = .key(.enterGroupName)
             return false
         }
         if !secret.isEmpty && secret.count < 4 {
             suggestsSettings = false
-            errorMessage = "Passordet må ha minst 4 tegn."
+            errorNotice = .key(.passwordRule)
             return false
         }
         guard signedIn, socketOpen else {
             suggestsSettings = false
-            errorMessage = "Logg inn"
+            errorNotice = .key(.signIn)
             return false
         }
         preferTalk = id
@@ -381,12 +403,12 @@ final class WalkieSession: ObservableObject {
         let label = Self.clip(rawName, limit: 30)
         guard !label.isEmpty else {
             suggestsSettings = false
-            errorMessage = "Skriv et gruppenavn."
+            errorNotice = .key(.enterGroupName)
             return false
         }
         guard signedIn, socketOpen else {
             suggestsSettings = false
-            errorMessage = "Logg inn"
+            errorNotice = .key(.signIn)
             return false
         }
         socket.sendRequestJoin(name: label)
@@ -399,17 +421,17 @@ final class WalkieSession: ObservableObject {
         let secret = String(rawPassword.prefix(80))
         guard !label.isEmpty else {
             suggestsSettings = false
-            errorMessage = "Skriv et gruppenavn."
+            errorNotice = .key(.enterGroupName)
             return false
         }
         guard secret.count >= 4 else {
             suggestsSettings = false
-            errorMessage = "Passordet må ha minst 4 tegn."
+            errorNotice = .key(.passwordRule)
             return false
         }
         guard signedIn, socketOpen else {
             suggestsSettings = false
-            errorMessage = "Logg inn"
+            errorNotice = .key(.signIn)
             return false
         }
         socket.sendJoinWithPassword(name: label, password: secret)
@@ -421,12 +443,12 @@ final class WalkieSession: ObservableObject {
         let secret = String(rawPassword.prefix(80))
         if !secret.isEmpty && secret.count < 4 {
             suggestsSettings = false
-            errorMessage = "Passordet må ha minst 4 tegn."
+            errorNotice = .key(.passwordRule)
             return false
         }
         guard signedIn, socketOpen else {
             suggestsSettings = false
-            errorMessage = "Logg inn"
+            errorNotice = .key(.signIn)
             return false
         }
         socket.sendSetPassword(room: room, password: secret)
@@ -438,7 +460,7 @@ final class WalkieSession: ObservableObject {
         let user = Self.normalizeUsername(rawUser)
         guard Self.validUsername(user) else {
             suggestsSettings = false
-            errorMessage = "Skriv et brukernavn."
+            errorNotice = .key(.enterUsername)
             return false
         }
         socket.sendInvite(room: room, username: user)
@@ -476,7 +498,7 @@ final class WalkieSession: ObservableObject {
     func deleteAccount() {
         guard signedIn, socketOpen else {
             suggestsSettings = false
-            errorMessage = "Logg inn"
+            errorNotice = .key(.signIn)
             return
         }
         socket.sendDeleteAccount()
@@ -513,17 +535,17 @@ final class WalkieSession: ObservableObject {
         let user = Self.normalizeUsername(rawUser)
         guard Self.validUsername(user) else {
             suggestsSettings = false
-            errorMessage = "Skriv et brukernavn."
+            errorNotice = .key(.enterUsername)
             return false
         }
         guard user != accountUsername else {
             suggestsSettings = false
-            errorMessage = "Du kan ikke kontakte deg selv."
+            errorNotice = .key(.cannotContactSelf)
             return false
         }
         guard signedIn, socketOpen else {
             suggestsSettings = false
-            errorMessage = "Logg inn"
+            errorNotice = .key(.signIn)
             return false
         }
         socket.sendDirect(username: user)
@@ -590,20 +612,20 @@ final class WalkieSession: ObservableObject {
     }
 
     func dismissError() {
-        errorMessage = nil
+        errorNotice = nil
         suggestsSettings = false
     }
 
     func connect() {
         guard signedIn else {
             suggestsSettings = false
-            errorMessage = "Logg inn"
+            errorNotice = .key(.signIn)
             return
         }
         guard linkState == .signedIn || linkState == .disconnected else { return }
         guard !groups.isEmpty else {
             suggestsSettings = false
-            errorMessage = "Opprett en gruppe, eller start en direkte samtale."
+            errorNotice = .key(.needGroup)
             return
         }
         if !groups.contains(where: { $0.id == talkGroup }) {
@@ -611,7 +633,7 @@ final class WalkieSession: ObservableObject {
         }
         guard let url = Self.normalizeServerURL(serverURL) else {
             suggestsSettings = false
-            errorMessage = "Serveradressen må være ws:// eller wss://."
+            errorNotice = .key(.badServer)
             return
         }
         syncRoomName()
@@ -623,7 +645,7 @@ final class WalkieSession: ObservableObject {
         reconnectAttempt = 0
         dismissError()
         linkState = .connecting
-        statusText = "Kobler til…"
+        statusCode = .connecting
         connectTask?.cancel()
         if sameServer {
             connectTask = Task { await self.startAudioOnly() }
@@ -647,7 +669,7 @@ final class WalkieSession: ObservableObject {
             prepareVolumeHUD()
             if socketOpen {
                 linkState = .signedIn
-                statusText = "Innlogget"
+                statusCode = .signedIn
             } else {
                 openAccountSocket()
             }
@@ -657,7 +679,7 @@ final class WalkieSession: ObservableObject {
         socketOpen = false
         socketReady = false
         linkState = .disconnected
-        statusText = "Ikke tilkoblet"
+        statusCode = .disconnected
         prepareVolumeHUD()
     }
 
@@ -726,20 +748,16 @@ final class WalkieSession: ObservableObject {
         let granted = await requestMicrophoneAccess()
         guard shouldReconnect, !Task.isCancelled else { return }
         guard granted else {
-            failBeforeSession(VoiceEngineError.microphoneDenied.localizedDescription, settings: true)
+            failBeforeSession(.microphoneDenied, settings: true)
             return
         }
         do {
             try engine.start()
-        } catch VoiceEngineError.microphoneDenied {
-            failBeforeSession(VoiceEngineError.microphoneDenied.localizedDescription, settings: true)
-            return
         } catch let error as VoiceEngineError {
-            let denied = AVAudioApplication.shared.recordPermission != .granted
-            failBeforeSession(error.localizedDescription, settings: denied)
+            failBeforeSession(Self.audioAlert(error), settings: error == .microphoneDenied || AVAudioApplication.shared.recordPermission != .granted)
             return
         } catch {
-            failBeforeSession("Fikk ikke startet lyden.", settings: false)
+            failBeforeSession(.failedToStart, settings: false)
             return
         }
         guard shouldReconnect, !Task.isCancelled else {
@@ -752,7 +770,7 @@ final class WalkieSession: ObservableObject {
         if signedIn {
             hasConnectedOnce = true
             linkState = .connected
-            statusText = "Tilkoblet"
+            statusCode = .connected
         }
         guard let activeURL else { return }
         socket.connect(url: activeURL)
@@ -762,20 +780,16 @@ final class WalkieSession: ObservableObject {
         let granted = await requestMicrophoneAccess()
         guard shouldReconnect, !Task.isCancelled else { return }
         guard granted else {
-            failBeforeSession(VoiceEngineError.microphoneDenied.localizedDescription, settings: true)
+            failBeforeSession(.microphoneDenied, settings: true)
             return
         }
         do {
             try engine.start()
-        } catch VoiceEngineError.microphoneDenied {
-            failBeforeSession(VoiceEngineError.microphoneDenied.localizedDescription, settings: true)
-            return
         } catch let error as VoiceEngineError {
-            let denied = AVAudioApplication.shared.recordPermission != .granted
-            failBeforeSession(error.localizedDescription, settings: denied)
+            failBeforeSession(Self.audioAlert(error), settings: error == .microphoneDenied || AVAudioApplication.shared.recordPermission != .granted)
             return
         } catch {
-            failBeforeSession("Fikk ikke startet lyden.", settings: false)
+            failBeforeSession(.failedToStart, settings: false)
             return
         }
         guard shouldReconnect, !Task.isCancelled else {
@@ -787,7 +801,7 @@ final class WalkieSession: ObservableObject {
         audioReady = true
         hasConnectedOnce = true
         linkState = .connected
-        statusText = "Tilkoblet"
+        statusCode = .connected
         pushSubscribe()
     }
 
@@ -797,7 +811,7 @@ final class WalkieSession: ObservableObject {
         await AVAudioApplication.requestRecordPermission()
     }
 
-    private func failBeforeSession(_ message: String, settings: Bool) {
+    private func failBeforeSession(_ alert: AudioAlert, settings: Bool) {
         shouldReconnect = false
         reconnectAttempt = 0
         audioReady = false
@@ -805,14 +819,25 @@ final class WalkieSession: ObservableObject {
         clearPresence()
         if signedIn {
             linkState = .signedIn
-            statusText = "Innlogget"
+            statusCode = .signedIn
         } else {
             linkState = .disconnected
-            statusText = "Ikke tilkoblet"
+            statusCode = .disconnected
         }
         suggestsSettings = settings
-        errorMessage = message
+        errorNotice = .audio(alert)
         prepareVolumeHUD()
+    }
+
+    private static func audioAlert(_ error: VoiceEngineError) -> AudioAlert {
+        switch error {
+        case .noInput:
+            return .noInput
+        case .failedToStart:
+            return .failedToStart
+        case .microphoneDenied:
+            return .microphoneDenied
+        }
     }
 
     private func handleOpen() {
@@ -839,11 +864,11 @@ final class WalkieSession: ObservableObject {
         guard wantsAudio || wantsAccount else { return }
         if wantsAudio {
             linkState = .reconnecting
-            statusText = "Frakoblet – prøver igjen…"
+            statusCode = .reconnecting
         } else {
             linkState = .connecting
             restoringSession = !signedIn
-            statusText = signedIn ? "Kobler til…" : "Logger inn…"
+            statusCode = signedIn ? .connecting : .signingIn
         }
         scheduleReconnect()
     }
@@ -857,7 +882,7 @@ final class WalkieSession: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self, !Task.isCancelled, !self.socketOpen, let url = self.activeURL else { return }
             guard self.shouldReconnect || self.keepAccount else { return }
-            self.statusText = self.signedIn ? "Kobler til…" : "Logger inn…"
+            self.statusCode = self.signedIn ? .connecting : .signingIn
             self.socket.connect(url: url)
         }
     }
@@ -884,10 +909,10 @@ final class WalkieSession: ObservableObject {
             if audioReady {
                 hasConnectedOnce = true
                 linkState = .connected
-                statusText = "Tilkoblet"
+                statusCode = .connected
             } else {
                 linkState = .signedIn
-                statusText = "Innlogget"
+                statusCode = .signedIn
             }
             savePreferences()
         case .inbox(let serverGroups, let nextInvites, let nextRequests, let blocked, let directs):
@@ -896,10 +921,10 @@ final class WalkieSession: ObservableObject {
             applyInbox(serverGroups, invites: nextInvites, requests: nextRequests)
         case .reported:
             suggestsSettings = false
-            errorMessage = "Rapporten er sendt."
+            errorNotice = .key(.reportSent)
         case .accountDeleted:
             suggestsSettings = false
-            errorMessage = "Kontoen er slettet."
+            errorNotice = .key(.accountDeleted)
             logOut()
         case .users(let room, let members, let selfID):
             let key = room.isEmpty ? talkGroup : room
@@ -945,9 +970,9 @@ final class WalkieSession: ObservableObject {
                 socketOpen = false
                 socketReady = false
                 linkState = .disconnected
-                statusText = "Ikke tilkoblet"
+                statusCode = .disconnected
                 suggestsSettings = false
-                errorMessage = text == "Logg inn" ? "Logg inn på nytt." : text
+                errorNotice = text == "Logg inn" ? .key(.loginAgain) : .phrase(text)
                 prepareVolumeHUD()
                 return
             }
@@ -959,9 +984,9 @@ final class WalkieSession: ObservableObject {
             }
             let label = groups.first { $0.id == room }?.name ?? room
             if label.isEmpty {
-                errorMessage = text
+                errorNotice = .phrase(text)
             } else {
-                errorMessage = "\(label): \(text)"
+                errorNotice = .room(label, text)
             }
         }
     }
@@ -1221,7 +1246,7 @@ final class WalkieSession: ObservableObject {
     private func openAccountSocket() {
         guard let url = Self.normalizeServerURL(serverURL) else {
             suggestsSettings = false
-            errorMessage = "Serveradressen må være ws:// eller wss://."
+            errorNotice = .key(.badServer)
             restoringSession = false
             linkState = signedIn ? .signedIn : .disconnected
             return
@@ -1232,7 +1257,7 @@ final class WalkieSession: ObservableObject {
         keepAccount = true
         if linkState == .disconnected || linkState == .signedIn {
             linkState = .connecting
-            statusText = restoringSession ? "Logger inn…" : "Kobler til…"
+            statusCode = restoringSession ? .signingIn : .connecting
         }
         socket.connect(url: url)
     }
@@ -1282,6 +1307,7 @@ final class WalkieSession: ObservableObject {
         static let quietEnabled = "walkie.quiet.enabled"
         static let quietFrom = "walkie.quiet.from"
         static let quietTo = "walkie.quiet.to"
+        static let language = "walkie.language"
     }
 
     private static func normalizeUsername(_ raw: String) -> String {

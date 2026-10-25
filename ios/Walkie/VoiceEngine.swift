@@ -7,14 +7,15 @@ enum VoiceEngineError: LocalizedError, Equatable {
     case failedToStart
     case microphoneDenied
 
+    /// Log text only. Alerts use `AudioAlert` so the in-app language can change them.
     var errorDescription: String? {
         switch self {
         case .noInput:
-            return "Fant ingen mikrofon."
+            return "Couldn't find a microphone."
         case .failedToStart:
-            return "Fikk ikke startet lyden."
+            return "Couldn't start audio."
         case .microphoneDenied:
-            return "TalkNet får ikke bruke mikrofonen. Åpne Innstillinger og slå på Mikrofon for TalkNet."
+            return "TalkNet can't use the microphone."
         }
     }
 }
@@ -32,7 +33,7 @@ enum VoiceEngineError: LocalizedError, Equatable {
 /// app when the phone is locked. Samples are only sent upstream while the
 /// microphone flag is open. Switching the speaker does not rebuild the engine.
 final class VoiceEngine {
-    var onFailure: ((String) -> Void)?
+    var onFailure: ((AudioAlert) -> Void)?
     var onInterrupted: (() -> Void)?
     /// Category, mode, activation, or speaker override changed. Not used for
     /// opening or closing the microphone during talk.
@@ -207,7 +208,7 @@ final class VoiceEngine {
             do {
                 try self.startFresh(force: false)
             } catch {
-                self.reportFailure(Self.failureMessage(for: error, fallback: "Lyden stoppet og kunne ikke startes igjen."))
+                self.reportFailure(Self.failureAlert(for: error, fallback: .stopped))
             }
         }
     }
@@ -392,7 +393,7 @@ final class VoiceEngine {
         }
     }
 
-    private func restartAudio(_ message: String) {
+    private func restartAudio(_ alert: AudioAlert) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let allowed = self.queue.sync { self.shouldRun }
@@ -400,16 +401,21 @@ final class VoiceEngine {
             do {
                 try self.startFresh(force: true)
             } catch {
-                self.reportFailure(Self.failureMessage(for: error, fallback: message))
+                self.reportFailure(Self.failureAlert(for: error, fallback: alert))
             }
         }
     }
 
-    private static func failureMessage(for error: Error, fallback: String) -> String {
-        if let engineError = error as? VoiceEngineError, let description = engineError.errorDescription {
-            return description
+    private static func failureAlert(for error: Error, fallback: AudioAlert) -> AudioAlert {
+        guard let engineError = error as? VoiceEngineError else { return fallback }
+        switch engineError {
+        case .noInput:
+            return .noInput
+        case .failedToStart:
+            return .failedToStart
+        case .microphoneDenied:
+            return .microphoneDenied
         }
-        return fallback
     }
 
     private func activateSession() throws {
@@ -994,7 +1000,7 @@ final class VoiceEngine {
             let optionsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
             guard options.contains(.shouldResume) else { return }
-            restartAudio("Lyden ble avbrutt og kunne ikke startes igjen.")
+            restartAudio(.interrupted)
         @unknown default:
             break
         }
@@ -1010,7 +1016,7 @@ final class VoiceEngine {
             let rate = AVAudioSession.sharedInstance().sampleRate
             let current = self.playbackFormat?.sampleRate ?? 0
             if current > 0, rate > 0, abs(rate - current) > 1 {
-                self.restartAudio("Lydutgangen endret seg, og lyden kunne ikke startes igjen.")
+                self.restartAudio(.routeChanged)
             } else {
                 self.applyOutputRoute()
             }
@@ -1018,7 +1024,7 @@ final class VoiceEngine {
     }
 
     private func handleMediaReset() {
-        restartAudio("Lyden ble tilbakestilt og kunne ikke startes igjen.")
+        restartAudio(.mediaReset)
     }
 
     private func reportSessionReconfigured() {
@@ -1032,9 +1038,9 @@ final class VoiceEngine {
         }
     }
 
-    private func reportFailure(_ message: String) {
+    private func reportFailure(_ alert: AudioAlert) {
         DispatchQueue.main.async { [weak self] in
-            self?.onFailure?(message)
+            self?.onFailure?(alert)
         }
     }
 }
