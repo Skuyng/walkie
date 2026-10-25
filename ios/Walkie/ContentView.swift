@@ -4,24 +4,17 @@ import UIKit
 struct ContentView: View {
     @StateObject private var session = WalkieSession()
     @Environment(\.scenePhase) private var scenePhase
-    @FocusState private var focus: Field?
     @State private var darkMode = false
     @State private var savedBrightness: CGFloat?
-    @State private var showGroups = false
-
-    private enum Field: Hashable {
-        case server
-    }
+    @State private var showMenu = false
 
     var body: some View {
         ZStack {
             AuroraBackground(live: auroraLive)
             if !session.signedIn {
                 AccountGate(session: session)
-            } else if session.hasConnectedOnce {
-                talkScreen
             } else {
-                homeScreen
+                talkScreen
             }
             if darkMode {
                 darkOverlay
@@ -65,8 +58,8 @@ struct ContentView: View {
             syncDarkMode(with: phase)
             refreshVolumeButtons()
         }
-        .sheet(isPresented: $showGroups) {
-            GroupSheet(session: session)
+        .sheet(isPresented: $showMenu) {
+            HomeMenu(session: session)
                 .presentationBackground {
                     AuroraBackground(live: auroraLive)
                 }
@@ -85,102 +78,27 @@ struct ContentView: View {
         }
     }
 
-    private var homeScreen: some View {
-        ScrollView {
-            GlassEffectContainer(spacing: 12) {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(spacing: 12) {
-                        Image(systemName: "dot.radiowaves.left.and.right")
-                            .font(.system(size: 34, weight: .semibold))
-                            .frame(width: 88, height: 88)
-                            .glassEffect(.regular.tint(Aurora.teal), in: Circle())
-                        Text("Walkie")
-                            .font(.largeTitle.weight(.bold))
-                        Text(accountCaption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.bottom, 4)
-
-                    GroupEditor(session: session)
-
-                    labeledField("Server") {
-                        TextField(WalkieSession.defaultServerURL, text: $session.serverURL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .keyboardType(.URL)
-                            .textContentType(.URL)
-                            .submitLabel(.go)
-                            .focused($focus, equals: .server)
-                            .onSubmit { session.connect() }
-                            .auroraField()
-                    }
-
-                    Button(action: session.connect) {
-                        Label(
-                            session.linkState == .connecting ? "Kobler til…" : "Koble til",
-                            systemImage: "antenna.radiowaves.left.and.right"
-                        )
-                        .font(.title3.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                    }
-                    .buttonStyle(.glassProminent)
-                    .tint(Aurora.teal)
-                    .controlSize(.large)
-                    .disabled(session.linkState == .connecting || session.linkState == .reconnecting)
-                    .padding(.top, 4)
-
-                    if session.linkState == .connecting || session.linkState == .reconnecting {
-                        Label(session.statusText, systemImage: statusSymbol)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                        Button("Avbryt", systemImage: "xmark") { session.disconnect() }
-                            .buttonStyle(.glass)
-                            .frame(maxWidth: .infinity)
-                    }
-
-                    Button("Logg ut", action: session.logOut)
-                        .buttonStyle(.glass)
-                        .frame(maxWidth: .infinity)
-                    AccountFooter(session: session)
-                }
-            }
-            .padding(24)
-        }
-        .scrollDismissesKeyboard(.interactively)
-    }
-
-    private var accountCaption: String {
-        if session.accountUsername.isEmpty { return session.name }
-        if session.name.isEmpty { return "@\(session.accountUsername)" }
-        return "\(session.name) (@\(session.accountUsername))"
-    }
-
     private var talkScreen: some View {
         GeometryReader { geo in
             let side = min(geo.size.width - 64, max(220, geo.size.height - 240))
             ZStack {
                 GlassEffectContainer(spacing: 16) {
-                    VStack(spacing: 18) {
-                        TuningReadout(code: talkCode, name: channelName, mode: radioMode, action: openGroups)
+                    VStack(spacing: 16) {
+                        homeTopBar
                         JoinBanner(text: session.joinProblem(for: session.talkGroup))
                         Spacer(minLength: 0)
-                        speakerRow
                         talkButton(side: side)
-                        CenterStatusLine(text: session.centerStatus, symbol: statusSymbol)
+                        HomePresence(session: session)
                         Spacer(minLength: 0)
                         TalkBottomBar(
                             speakerOn: session.speakerphone,
+                            link: linkAction,
                             onSpeaker: toggleSpeaker,
                             onDark: enterDarkMode,
-                            onGroups: openGroups,
-                            onDisconnect: disconnectTapped
+                            onLink: linkTapped
                         )
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 16)
+                    .padding(16)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
@@ -196,33 +114,69 @@ struct ContentView: View {
         }
     }
 
-    private func openGroups() {
-        showGroups = true
+    private var homeTopBar: some View {
+        HStack(spacing: 8) {
+            Text("Walkie")
+                .font(.title3.weight(.semibold))
+                .lineLimit(1)
+                .layoutPriority(1)
+            Spacer(minLength: 8)
+            TuningReadout(code: talkCode, name: channelName, mode: radioMode, action: openMenu)
+                .layoutPriority(-1)
+            profileButton
+                .layoutPriority(1)
+        }
+        .frame(minHeight: 48)
+    }
+
+    private var profileButton: some View {
+        Button(action: openMenu) {
+            Image(systemName: "person.crop.circle")
+                .font(.system(size: 20, weight: .semibold))
+                .frame(width: 40, height: 40)
+                .glassEffect(.regular, in: Circle())
+                .overlay(alignment: .topTrailing) {
+                    if hasAttention {
+                        Circle()
+                            .fill(Aurora.teal)
+                            .frame(width: 8, height: 8)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Innstillinger")
+    }
+
+    private var hasAttention: Bool {
+        !session.invites.isEmpty || !session.directRequests.isEmpty || !session.requests.isEmpty
+    }
+
+    private func openMenu() {
+        showMenu = true
     }
 
     private func toggleSpeaker() {
         session.speakerphone.toggle()
     }
 
-    private func disconnectTapped() {
-        session.disconnect()
+    private func linkTapped() {
+        switch linkAction {
+        case .connect:
+            session.connect()
+        case .cancel, .disconnect:
+            session.disconnect()
+        }
     }
 
-    private var speakerRow: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "speaker.wave.2.fill")
-                .symbolEffect(.variableColor.iterative, isActive: !session.speakerLine.isEmpty)
-            Text(session.speakerLine.isEmpty ? " " : session.speakerLine)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-                .multilineTextAlignment(.center)
+    private var linkAction: HomeLink {
+        switch session.linkState {
+        case .connected:
+            return .disconnect
+        case .connecting, .reconnecting:
+            return .cancel
+        case .signedIn, .disconnected:
+            return .connect
         }
-        .font(.system(.title3, design: .monospaced).weight(.semibold))
-        .foregroundStyle(Aurora.teal)
-        .frame(maxWidth: .infinity)
-        .frame(height: 32)
-        .opacity(session.speakerLine.isEmpty ? 0 : 1)
-        .accessibilityHidden(session.speakerLine.isEmpty)
     }
 
     private func talkButton(side: CGFloat) -> some View {
@@ -248,21 +202,6 @@ struct ContentView: View {
         if session.isTalking { return "TX" }
         if !session.talkers.isEmpty { return "RX" }
         return ""
-    }
-
-    private var statusSymbol: String {
-        switch session.linkState {
-        case .connected:
-            return "checkmark.circle.fill"
-        case .signedIn:
-            return "person.crop.circle"
-        case .connecting:
-            return "ellipsis.circle.fill"
-        case .reconnecting:
-            return "arrow.triangle.2.circlepath"
-        case .disconnected:
-            return "circle.slash"
-        }
     }
 
     private var darkOverlay: some View {
@@ -322,15 +261,6 @@ struct ContentView: View {
         }
         let listen = scenePhase == .active && session.linkState == .connected
         session.setVolumeButtonMonitoringEnabled(listen)
-    }
-
-    private func labeledField<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-            content()
-        }
     }
 
     private var errorPresented: Binding<Bool> {
@@ -461,30 +391,6 @@ private struct TalkButtonFace: View {
     }
 }
 
-private struct TalkGroupPill: View {
-    var title: String
-    var action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: "dot.radiowaves.left.and.right")
-                Text(title)
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
-            }
-            .font(.headline)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .glassEffect(.regular, in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityHint("Åpner gruppene")
-    }
-}
-
 private struct JoinBanner: View {
     let text: String
 
@@ -495,31 +401,118 @@ private struct JoinBanner: View {
             Label(text, systemImage: "exclamationmark.triangle.fill")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.red)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .glassEffect(.regular.tint(.red), in: Capsule())
         }
     }
 }
 
-private struct CenterStatusLine: View {
-    var text: String
-    var symbol: String
+private enum HomeLink: Equatable {
+    case connect, cancel, disconnect
+}
+
+private struct HomePresence: View {
+    @ObservedObject var session: WalkieSession
 
     var body: some View {
-        Label(text, systemImage: symbol)
-            .font(.system(.subheadline, design: .monospaced).weight(.medium))
-            .foregroundStyle(.secondary)
-            .symbolRenderingMode(.hierarchical)
+        VStack(spacing: 8) {
+            speakerLine
+            faceRow
+        }
+        .frame(height: 64)
+    }
+
+    private var speakerLine: some View {
+        ZStack {
+            Text(" ")
+            if !session.speakerLine.isEmpty {
+                Label(session.speakerLine, systemImage: "speaker.wave.2.fill")
+                    .labelStyle(.titleAndIcon)
+                    .symbolEffect(.variableColor.iterative)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+        }
+        .font(.system(.subheadline, design: .monospaced).weight(.medium))
+        .foregroundStyle(Aurora.teal)
+        .frame(maxWidth: .infinity)
+        .frame(height: 24)
+        .accessibilityHidden(session.speakerLine.isEmpty)
+    }
+
+    private var faceRow: some View {
+        HStack(spacing: 8) {
+            if session.linkState == .connected && !members.isEmpty {
+                HStack(spacing: -8) {
+                    ForEach(shownMembers) { member in
+                        PresenceFace(member: member)
+                    }
+                }
+                Text(countText)
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(session.centerStatus)
+            } else {
+                Text(idleText)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 32)
+    }
+
+    private var members: [OnlineMember] {
+        session.onlineMembers(in: session.talkGroup)
+    }
+
+    private var shownMembers: [OnlineMember] {
+        Array(members.prefix(4))
+    }
+
+    private var countText: String {
+        "\(members.count)"
+    }
+
+    private var idleText: String {
+        if session.linkState == .connected { return "Ingen pålogget" }
+        return session.statusText
+    }
+}
+
+private struct PresenceFace: View {
+    let member: OnlineMember
+
+    var body: some View {
+        Text(initial)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(member.talking ? Aurora.teal : .primary)
+            .frame(width: 32, height: 32)
+            .background(.ultraThinMaterial, in: Circle())
+            .glassEffect(.regular, in: Circle())
+            .overlay {
+                if member.talking {
+                    Circle().strokeBorder(Aurora.teal, lineWidth: 1.5)
+                }
+            }
+            .accessibilityLabel(member.talking ? "\(member.name) snakker" : member.name)
+    }
+
+    private var initial: String {
+        let trimmed = member.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first else { return "?" }
+        return String(first).uppercased()
     }
 }
 
 private struct TalkBottomBar: View {
     var speakerOn: Bool
+    var link: HomeLink
     var onSpeaker: () -> Void
     var onDark: () -> Void
-    var onGroups: () -> Void
-    var onDisconnect: () -> Void
+    var onLink: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -530,10 +523,21 @@ private struct TalkBottomBar: View {
                 action: onSpeaker
             )
             TalkIconButton(systemImage: "moon.fill", title: "Mørk modus", tint: .primary, action: onDark)
-            TalkIconButton(systemImage: "person.3.fill", title: "Grupper", tint: .primary, action: onGroups)
-            TalkIconButton(systemImage: "phone.down.fill", title: "Koble fra", tint: .red, action: onDisconnect)
+            if link == .connect {
+                Button(action: onLink) {
+                    Text("Koble til")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Aurora.teal)
+                        .padding(.horizontal, 16)
+                        .frame(height: 48)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Koble til")
+            } else {
+                TalkIconButton(systemImage: linkIcon, title: linkTitle, tint: linkTint, action: onLink)
+            }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 8)
         .padding(.vertical, 8)
         .glassEffect(.regular, in: Capsule())
         .accessibilityElement(children: .contain)
@@ -550,6 +554,39 @@ private struct TalkBottomBar: View {
     private var speakerTitle: String {
         speakerOn ? "Høyttaler på" : "Høyttaler av"
     }
+
+    private var linkIcon: String {
+        switch link {
+        case .connect:
+            return "antenna.radiowaves.left.and.right"
+        case .cancel:
+            return "xmark"
+        case .disconnect:
+            return "phone.down.fill"
+        }
+    }
+
+    private var linkTitle: String {
+        switch link {
+        case .connect:
+            return "Koble til"
+        case .cancel:
+            return "Avbryt"
+        case .disconnect:
+            return "Koble fra"
+        }
+    }
+
+    private var linkTint: Color {
+        switch link {
+        case .connect:
+            return Aurora.teal
+        case .cancel:
+            return .primary
+        case .disconnect:
+            return .red
+        }
+    }
 }
 
 private struct TalkIconButton: View {
@@ -561,42 +598,83 @@ private struct TalkIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.title3.weight(.semibold))
+                .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(tint)
-                .frame(width: 52, height: 44)
+                .frame(width: 48, height: 48)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
     }
 }
 
-private struct GroupSheet: View {
+private struct HomeMenu: View {
     @ObservedObject var session: WalkieSession
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                GroupEditor(session: session)
-                    .padding(20)
-                AccountFooter(session: session)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 24)
+                GlassEffectContainer(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 24) {
+                        accountHeader
+                        GroupEditor(session: session)
+                        serverField
+                        AccountFooter(session: session, onLogOut: logOut)
+                    }
+                    .padding(16)
+                    .padding(.bottom, 8)
+                }
             }
             .scrollContentBackground(.hidden)
-            .navigationTitle("Grupper")
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle("Innstillinger")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Logg ut") {
-                        session.logOut()
-                        dismiss()
-                    }
-                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Ferdig") { dismiss() }
                 }
             }
         }
+    }
+
+    private var accountHeader: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(displayName)
+                .font(.title2.weight(.semibold))
+                .lineLimit(1)
+            if !session.accountUsername.isEmpty {
+                Text("@\(session.accountUsername)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var displayName: String {
+        if session.name.isEmpty { return session.accountUsername }
+        return session.name
+    }
+
+    private var serverField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Server")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            TextField(WalkieSession.defaultServerURL, text: $session.serverURL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .textContentType(.URL)
+                .submitLabel(.done)
+                .auroraField()
+        }
+    }
+
+    private func logOut() {
+        session.logOut()
+        dismiss()
     }
 }
 
@@ -736,10 +814,18 @@ private struct GroupEditor: View {
     @State private var draftPassword = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 24) {
+            if !session.invites.isEmpty {
+                InviteSection(session: session)
+            }
+            groupFields
             DirectSection(session: session)
-            InviteSection(session: session)
-            Text("Gruppe")
+        }
+    }
+
+    private var groupFields: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Grupper")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
             TextField("Gruppenavn (f.eks. Familie)", text: $draftName)
@@ -752,7 +838,7 @@ private struct GroupEditor: View {
                 .autocorrectionDisabled()
                 .textContentType(.password)
                 .glassFieldChrome()
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button(action: createTapped) {
                     Text("Opprett gruppe")
                         .frame(maxWidth: .infinity)
@@ -818,11 +904,11 @@ private struct InviteRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(invite.name)
-                .font(.system(.headline, design: .monospaced))
+                .font(.headline)
             Text(fromLine)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button("Godta") { session.replyInvite(room: invite.room, accept: true) }
                 .buttonStyle(.glassProminent)
                 .tint(Aurora.teal)
@@ -885,7 +971,7 @@ private struct DirectRequestRow: View {
             Text(detail)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 if request.incoming {
                     Button("Godta") { session.replyDirect(username: request.username, accept: true) }
                         .buttonStyle(.glassProminent)
@@ -960,6 +1046,7 @@ private struct GroupRow: View {
                     .buttonStyle(.glass)
                 Button(role: .destructive, action: removeTapped) {
                     Image(systemName: "trash")
+                        .font(.body.weight(.semibold))
                 }
                 .buttonStyle(.glass)
                 .accessibilityLabel("Fjern \(group.name)")
@@ -1127,10 +1214,10 @@ private struct RequestRow: View {
     let request: WalkieRequest
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(requestLabel)
                 .font(.subheadline.weight(.semibold))
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button("Godta") { session.replyRequest(room: request.room, username: request.username, accept: true) }
                     .buttonStyle(.glassProminent)
                     .tint(.red)
@@ -1241,7 +1328,7 @@ private struct LegalLinks: View {
         }
         .buttonStyle(.plain)
         .font(.subheadline.weight(.semibold))
-        .foregroundStyle(.red)
+        .foregroundStyle(.secondary)
     }
 
     private func open(_ path: String) {
@@ -1252,14 +1339,15 @@ private struct LegalLinks: View {
 
 private struct AccountFooter: View {
     @ObservedObject var session: WalkieSession
+    var onLogOut: () -> Void
     @State private var confirmDelete = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Konto")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 16) {
             LegalLinks(server: session.serverURL)
+            Button("Logg ut", action: onLogOut)
+                .buttonStyle(.glass)
+                .frame(maxWidth: .infinity)
             Button("Slett konto") { confirmDelete = true }
                 .buttonStyle(.glass)
                 .tint(.red)
@@ -1327,8 +1415,8 @@ private struct MemberLine: View {
                 .font(nameFont)
                 .foregroundStyle(nameColor)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())
     }
 
@@ -1337,8 +1425,7 @@ private struct MemberLine: View {
     }
 
     private var nameFont: Font {
-        if member.talking { return .system(.body, design: .monospaced).weight(.bold) }
-        return .system(.body, design: .monospaced)
+        member.talking ? .body.weight(.semibold) : .body
     }
 
     private var nameColor: Color {

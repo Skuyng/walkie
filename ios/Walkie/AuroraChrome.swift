@@ -467,28 +467,38 @@ struct TuningReadout: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 3) {
+            HStack(spacing: 8) {
                 Text(code)
                     .font(.system(.caption, design: .monospaced).weight(.semibold))
                     .foregroundStyle(.secondary)
+                    .fixedSize()
                 Text(name)
-                    .font(.system(.title3, design: .monospaced).weight(.semibold))
+                    .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
-                ModeLabel(mode: mode)
+                    .frame(maxWidth: 104)
+                    .layoutPriority(-1)
+                if !mode.isEmpty {
+                    Text(mode)
+                        .font(.system(.caption2, design: .monospaced).weight(.bold))
+                        .foregroundStyle(mode == "TX" ? Aurora.teal : Aurora.violet)
+                        .fixedSize()
+                        .accessibilityLabel(mode == "TX" ? "Sender" : "Mottar")
+                }
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 10)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.8))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
             .glassEffect(.regular, in: Capsule())
         }
         .buttonStyle(.plain)
-        .offset(x: settling ? 10 : 0)
         .opacity(settling ? 0.4 : 1)
         .animation(.easeOut(duration: 0.28), value: settling)
         .onChange(of: code) { _, _ in retune() }
-        .accessibilityHint("Åpner gruppene")
+        .accessibilityHint("Åpner innstillinger")
     }
 
     private func retune() {
@@ -496,23 +506,6 @@ struct TuningReadout: View {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(170))
             settling = false
-        }
-    }
-}
-
-struct ModeLabel: View {
-    var mode: String
-
-    var body: some View {
-        if mode.isEmpty {
-            Text(" ")
-                .font(.system(.caption2, design: .monospaced))
-                .accessibilityHidden(true)
-        } else {
-            Text(mode)
-                .font(.system(.caption2, design: .monospaced).weight(.bold))
-                .foregroundStyle(mode == "TX" ? Aurora.teal : Aurora.violet)
-                .accessibilityLabel(mode == "TX" ? "Sender" : "Mottar")
         }
     }
 }
@@ -527,7 +520,7 @@ struct ChannelTitle: View {
                 .font(.system(.caption2, design: .monospaced).weight(.semibold))
                 .foregroundStyle(.secondary)
             Text(name)
-                .font(.system(.headline, design: .monospaced))
+                .font(.headline)
                 .lineLimit(1)
         }
     }
@@ -536,13 +529,9 @@ struct ChannelTitle: View {
 extension View {
     func auroraCard() -> some View {
         self
-            .padding(12)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 0.8)
-            )
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .padding(16)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 
     func auroraField() -> some View {
@@ -550,12 +539,8 @@ extension View {
             .textFieldStyle(.plain)
             .tint(Aurora.teal)
             .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.8)
-            )
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .padding(.vertical, 16)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
