@@ -186,6 +186,9 @@ final class WaveRing: @unchecked Sendable {
     private let remoteCursor = AtomicWord()
     private let micHiddenBefore = AtomicWord()
     private let remoteHiddenBefore = AtomicWord()
+    /// Smoothed on the main thread only, from the canvas.
+    private var shownLevel: CGFloat = 0
+    private var shownAt: Double = 0
 
     init() {
         micValue = .allocate(capacity: Self.capacity)
@@ -221,8 +224,20 @@ final class WaveRing: @unchecked Sendable {
         remoteHiddenBefore.store(Self.stamp(CACurrentMediaTime()))
     }
 
+    /// Fast attack, light release. Main thread only.
+    fileprivate func displayLevel(remote: Bool, now: Double) -> CGFloat {
+        let raw = level(remote: remote, now: now)
+        let dt = shownAt == 0 ? 0.008 : min(0.05, max(0.001, now - shownAt))
+        shownAt = now
+        let tau = raw > shownLevel ? 0.016 : 0.05
+        let alpha = CGFloat(1 - exp(-dt / tau))
+        shownLevel += (raw - shownLevel) * alpha
+        if shownLevel < 0.012 { shownLevel = 0 }
+        return shownLevel
+    }
+
     /// Latest mic loudness, 0 when nothing recent is coming in.
-    fileprivate func level(remote: Bool, now: Double) -> CGFloat {
+    private func level(remote: Bool, now: Double) -> CGFloat {
         let values = remote ? remoteValue : micValue
         let times = remote ? remoteTime : micTime
         let cursor = remote ? remoteCursor.load() : micCursor.load()
@@ -313,7 +328,7 @@ struct TalkLevelFill: View {
     var receiving: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+        TimelineView(.animation(minimumInterval: nil)) { timeline in
             Canvas { context, size in
                 WaveDraw.draw(
                     context: &context,
@@ -351,7 +366,7 @@ private enum WaveDraw {
         let mid = size.height * 0.5
         let live = transmitting || receiving
         let subtler = receiving && !transmitting
-        let amplitude = live ? wave.level(remote: subtler, now: now) * (subtler ? 0.6 : 1) : 0
+        let amplitude = live ? wave.displayLevel(remote: subtler, now: now) * (subtler ? 0.6 : 1) : 0
         let path = standing(size: size, mid: mid, now: now, amplitude: amplitude)
         context.drawLayer { layer in
             layer.addFilter(.blur(radius: 3))
@@ -360,9 +375,9 @@ private enum WaveDraw {
         context.stroke(path, with: .color(teal), style: stroke)
     }
 
-    /// Fixed points across the button. Loudness only changes how far they swing.
+    /// Fixed points across the button. Each point oscillates on its own; nothing travels sideways.
     private static func standing(size: CGSize, mid: CGFloat, now: Double, amplitude: CGFloat) -> Path {
-        let columns = 48
+        let columns = Self.columns
         let reach = size.height * 0.34
         var points: [CGPoint] = []
         points.reserveCapacity(columns + 1)
@@ -370,13 +385,35 @@ private enum WaveDraw {
         while index <= columns {
             let across = CGFloat(index) / CGFloat(columns)
             let envelope = sin(across * .pi)
-            let wobble = sin(now * 36 + Double(index) * 0.91) * 0.62
-                + sin(now * 61 + Double(index) * 1.57) * 0.38
+            let wobble = sin(Self.hz[index] * now + Self.phase[index]) * 0.68
+                + sin(Self.hzB[index] * now + Self.phaseB[index]) * 0.32
             let y = mid - CGFloat(wobble) * envelope * amplitude * reach
             points.append(CGPoint(x: across * size.width, y: y))
             index += 1
         }
         return curve(points, spike: size.height * 0.08, mid: mid, width: size.width)
+    }
+
+    private static let columns = 48
+
+    /// Uncorrelated per point. Not a ramp along x, so the motion cannot slide sideways.
+    private static let hz: [Double] = Self.spread(seed: 0xC0FFEE, lo: 9, hi: 74)
+    private static let hzB: [Double] = Self.spread(seed: 0xBEE5, lo: 17, hi: 91)
+    private static let phase: [Double] = Self.spread(seed: 0xA11CE, lo: 0, hi: .pi * 2)
+    private static let phaseB: [Double] = Self.spread(seed: 0x51A7, lo: 0, hi: .pi * 2)
+
+    private static func spread(seed: UInt64, lo: Double, hi: Double) -> [Double] {
+        var state = seed
+        var values: [Double] = []
+        values.reserveCapacity(columns + 1)
+        var index = 0
+        while index <= columns {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            let unit = Double(state % 10_000) / 9999
+            values.append(lo + (hi - lo) * unit)
+            index += 1
+        }
+        return values
     }
 
     /// Catmull-Rom through ordinary samples. Steep jumps stay straight so spikes stay sharp.

@@ -413,7 +413,7 @@ final class VoiceEngine {
             throw VoiceEngineError.noInput
         }
         let ring = levelMeter
-        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+        engine.inputNode.installTap(onBus: 0, bufferSize: 256, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
             if self.waveArmed.load() != 0 {
                 ring?.writeMic(buffer)
