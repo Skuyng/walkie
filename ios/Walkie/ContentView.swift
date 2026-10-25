@@ -85,7 +85,7 @@ struct ContentView: View {
 
     private var talkScreen: some View {
         GeometryReader { geo in
-            let side = min(geo.size.width - 64, max(220, geo.size.height - 240))
+            let side = min(geo.size.width - 64, max(220, geo.size.height - 288))
             ZStack {
                 GlassEffectContainer(spacing: 16) {
                     VStack(spacing: 16) {
@@ -103,7 +103,9 @@ struct ContentView: View {
                             onLink: linkTapped
                         )
                     }
-                    .padding(16)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+                    .padding(.bottom, 16)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
@@ -120,7 +122,13 @@ struct ContentView: View {
     }
 
     private var homeTopBar: some View {
-        ZStack {
+        VStack(spacing: 20) {
+            TalkNetWordmark(mark: 28, titleFont: .title3.weight(.semibold))
+                .padding(.horizontal, 48)
+                .frame(maxWidth: .infinity, minHeight: 40)
+                .overlay(alignment: .trailing) {
+                    profileButton
+                }
             TuningReadout(
                 code: talkCode,
                 name: channelName,
@@ -130,16 +138,9 @@ struct ContentView: View {
                 hint: session.t(.opensSettings),
                 action: openMenu
             )
-                .fixedSize(horizontal: true, vertical: false)
-            HStack(spacing: 8) {
-                TalkNetWordmark(mark: 28, titleFont: .title3.weight(.semibold))
-                    .allowsHitTesting(false)
-                Spacer(minLength: 8)
-                profileButton
-            }
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity)
-        .frame(minHeight: 48)
     }
 
     private var profileButton: some View {

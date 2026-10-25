@@ -85,9 +85,9 @@ Nettleseren plukker nærmeste sample når den nedsampler. iOS bruker `AVAudioCon
 
 ## Bakgrunn og låst skjerm
 
-`Info.plist` har `UIBackgroundModes` satt til `audio`. Det trengs for at tale skal kunne spilles av når skjermen er låst. Appen lagrer ikke opptak. Siste melding ligger bare i minnet til appen lukkes eller du logger ut. Lydøkten er `playAndRecord` med modus `.default` (ikke `.voiceChat`, som demper høyttaleren). Motoren skrur på voice processing for ekkokansellering, støyreduksjon og automatisk nivå på mikrofonen. Avspilling jevnes ut i appen. Bluetooth tillater både `allowBluetoothHFP` og `allowBluetoothA2DP`. Et tilkoblet hodesett beholder ruten. **Høyttaler** på legger til `defaultToSpeaker` og tvinger høyttaler bare når ingen ekstern utgang er koblet til. Av lar lyden gå i ørepluggen når det ikke er et hodesett. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle, slik at innkommende tale kan fortsette når skjermen er låst.
+`Info.plist` har `UIBackgroundModes` satt til `audio`. Det trengs for at tale skal kunne spilles av når skjermen er låst. Appen lagrer ikke opptak. Siste melding ligger bare i minnet til appen lukkes eller du logger ut. Når du bare lytter, er økten avspilling (`.playback`) uten mikrofontap og uten voice processing, så den oransje mikrofonprikken er av. Innkommende lyd spilles fortsatt når skjermen er låst. **Høyttaler** av og ingen hodesett bruker `playAndRecord` bare for å velge ørepluggen, fortsatt uten å åpne mikrofonen. Når du holder Talk, bytter økten til `playAndRecord` med modus `.default` (ikke `.voiceChat`), skrur på voice processing på inngangsnoden, og spiller den korte klar-tonen før mikrofonen sendes. Når du slipper, fjernes tapet, voice processing skrus av, og økten går tilbake til avspilling. Bluetooth tillater både `allowBluetoothHFP` og `allowBluetoothA2DP` mens du sender. Et tilkoblet hodesett beholder ruten. **Høyttaler** på legger til `defaultToSpeaker` og tvinger høyttaler bare når ingen ekstern utgang er koblet til. Av lar lyden gå i ørepluggen når det ikke er et hodesett. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle.
 
-Den oransje mikrofonprikken lyser mens du er tilkoblet, fordi appen holder lydøkten i gang for å kunne ta imot tale i bakgrunnen. Du sender ikke lyd før du holder knappen inne, eller holder volum opp inne.
+Den oransje mikrofonprikken lyser mens Talk holdes inne (knappen, volum opp, eller hodetelefonens avspillingsknapp). Den er av når du bare lytter med høyttaler eller hodesett. Med **Høyttaler** av og ingen hodesett er økten `playAndRecord` kun for å velge ørepluggen, uten mikrofontap; iOS kan likevel vise prikken i det tilfellet.
 
 Dette er ikke Apples Push to Talk. Det rammeverket er ikke koblet inn.
 
@@ -110,5 +110,5 @@ xcodegen generate
 ## Begrensninger
 
 - To personer med samme visningsnavn vises som to rader, én per tilkobling.
-- Låst skjerm er satt opp med lydmodus og en aktiv `playAndRecord`-økt. Det er ikke prøvd på en fysisk iPhone herfra. iOS kan likevel stanse appen hvis det er lite ledig minne.
+- Låst skjerm er satt opp med lydmodus og en aktiv avspillingsøkt. Mikrofonen åpnes bare mens Talk holdes. Det er ikke prøvd på en fysisk iPhone herfra. iOS kan likevel stanse appen hvis det er lite ledig minne.
 - `ws://` mot offentlig nett kan bli stoppet av App Transport Security. Bruk `wss://` mot Render. Lokalt nett er tillatt.

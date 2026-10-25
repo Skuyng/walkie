@@ -229,8 +229,11 @@ final class WalkieSession: ObservableObject {
         engine.onInterrupted = { [weak self] in
             Task { @MainActor in self?.endTransmitting() }
         }
+        // Category changes post volume events on this turn. The ignore window
+        // has to be armed before setCategory returns, or a full-volume Talk
+        // press looks like volume-up and releases itself a moment later.
         engine.onSessionReconfigured = { [weak self] in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 guard let self else { return }
                 self.volumeButtons.noteSessionReconfigured()
                 self.haptics.prepare()
@@ -704,7 +707,7 @@ final class WalkieSession: ObservableObject {
         }
     }
 
-    /// Stops sending. Does not change the audio session category or mode.
+    /// Stops sending and returns the audio session to playback.
     func endTransmitting() {
         let was = transmitter.isTransmitting
         transmitter.endTransmitting()
@@ -1343,16 +1346,22 @@ extension WalkieSession: ChannelSignaling {
             engine.setMicrophoneOpen(false)
             return
         }
-        guard audioReady, socketReady, socketOpen else {
-            engine.setMicrophoneOpen(true)
-            return
-        }
         readyGeneration += 1
         let generation = readyGeneration
-        engine.playReadyChirp { [weak self] in
+        engine.prepareCapture { [weak self] ready in
             guard let self else { return }
-            guard self.isTalking, self.readyGeneration == generation else { return }
-            self.engine.setMicrophoneOpen(true)
+            guard ready, self.isTalking, self.readyGeneration == generation else {
+                self.engine.setMicrophoneOpen(false)
+                return
+            }
+            guard self.audioReady, self.socketReady, self.socketOpen else {
+                self.engine.setMicrophoneOpen(true)
+                return
+            }
+            self.engine.playReadyChirp { [weak self] in
+                guard let self, self.isTalking, self.readyGeneration == generation else { return }
+                self.engine.setMicrophoneOpen(true)
+            }
         }
     }
 }

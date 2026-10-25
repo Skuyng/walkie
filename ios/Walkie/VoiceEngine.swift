@@ -20,18 +20,23 @@ enum VoiceEngineError: LocalizedError, Equatable {
     }
 }
 
-/// Captures the microphone and plays incoming PCM16 while the session stays active.
+/// Plays incoming PCM16 for the whole connection, and opens the microphone only
+/// while Talk is held.
 ///
-/// `playAndRecord` uses mode `.default`. `.voiceChat` quiets the loudspeaker, so
-/// the session stays in `.default` and voice processing is enabled on the engine
-/// instead (echo cancellation, noise suppression, and capture AGC).
-/// `allowBluetoothHFP` and `allowBluetoothA2DP` both stay available. A connected
-/// headset keeps the route; Høyttaler adds `defaultToSpeaker` and a speaker
-/// override only when nothing external is plugged in.
-/// Incoming PCM stays 16 kHz and is converted to the hardware rate. The input tap stays
-/// installed for the whole connection so iOS treats the app as an active audio
-/// app when the phone is locked. Samples are only sent upstream while the
-/// microphone flag is open. Switching the speaker does not rebuild the engine.
+/// Idle listening uses a playback engine. The input node is never tapped and
+/// voice processing stays off, so iOS does not show the microphone indicator.
+/// The built-in receiver is the one exception: with Høyttaler off and no
+/// headset, the session is `playAndRecord` for routing only, still with no tap
+/// and no voice processing. Holding Talk switches to `playAndRecord`, enables
+/// voice processing on the input node, installs the tap, then the ready chirp
+/// plays before any mic frames are sent. Releasing removes the tap, turns
+/// voice processing off, and returns to playback.
+///
+/// `playAndRecord` uses mode `.default`. `.voiceChat` quiets the loudspeaker.
+/// `allowBluetoothHFP` and `allowBluetoothA2DP` both stay available while
+/// capturing. A connected headset keeps the route; Høyttaler adds
+/// `defaultToSpeaker` and a speaker override only when nothing external is
+/// plugged in. Incoming PCM stays 16 kHz.
 final class VoiceEngine {
     var onFailure: ((AudioAlert) -> Void)?
     var onInterrupted: (() -> Void)?
@@ -55,6 +60,8 @@ final class VoiceEngine {
     private var engineOwnsSession = false
     private var voicePlayer: AVAudioPlayerNode?
     private var beepPlayer: AVAudioPlayerNode?
+    /// Silent loop so a locked phone keeps the playback engine awake without the mic.
+    private var keepAlivePlayer: AVAudioPlayerNode?
     private var playbackFormat: AVAudioFormat?
     private var encoder: FormatConverter?
     private var encoderInputKey: String?
@@ -70,8 +77,12 @@ final class VoiceEngine {
     private var lastAudioAt = Date.distantPast
     /// True while the local ready chirp owns the beep player.
     private var chirpPlaying = false
-    /// Set after voice processing fails once, so the next start still opens the mic.
+    /// Set after voice processing fails once, so the next capture still opens the mic.
     private var voiceProcessingDisabled = false
+    /// True only while Talk holds a tapped input with voice processing.
+    private var wantsCapture = false
+    private var captureArmed = false
+    private var voiceProcessingOn = false
     private let incomingMuted = OSAllocatedUnfairLock(initialState: false)
     private var playbackGain: Float = 1
     private var playingClip = false
@@ -134,24 +145,62 @@ final class VoiceEngine {
         levelMeterLock.unlock()
     }
 
-    /// Opens or closes the capture gate only. The `playAndRecord` session stays
-    /// as it was for the whole connection; changing category or mode here makes
-    /// iOS post volume events and looks like another button press.
+    /// Opens the send gate when a capture graph is already up, or tears that
+    /// graph down. Arming the microphone is `prepareCapture`.
     func setMicrophoneOpen(_ open: Bool) {
-        micOpen.withLock { $0 = open }
-        waveArmed.store(open ? 1 : 0)
-        if !open {
-            currentLevelMeter()?.hideMic()
+        if open {
+            openCaptureGate()
+        } else {
+            endCapture()
+        }
+    }
+
+    /// Switches the live engine to `playAndRecord` with voice processing and an
+    /// input tap. The send gate stays closed. `then` runs on the main queue.
+    func prepareCapture(then: @escaping (Bool) -> Void) {
+        let run: () -> Void = { [weak self] in
+            guard let self else {
+                then(false)
+                return
+            }
+            then(self.prepareCaptureOnMain())
+        }
+        if Thread.isMainThread {
+            run()
+        } else {
+            DispatchQueue.main.async(execute: run)
+        }
+    }
+
+    /// Stops sending, removes the tap, disables voice processing, and restores
+    /// playback when a call is still up.
+    func endCapture() {
+        let run: () -> Void = { [weak self] in
+            self?.endCaptureOnMain()
+        }
+        if Thread.isMainThread {
+            run()
+        } else {
+            DispatchQueue.main.async(execute: run)
         }
     }
 
     func setSpeakerphone(_ enabled: Bool) {
-        let apply = { [weak self] in
+        let apply: () -> Void = { [weak self] in
             guard let self else { return }
             self.useSpeaker = enabled
-            guard AVAudioSession.sharedInstance().category == .playAndRecord else { return }
-            self.applyOutputRoute(force: true)
-            self.ensureRunning()
+            let capturing = self.queue.sync { self.wantsCapture }
+            if capturing {
+                self.applyOutputRoute(force: true)
+                self.ensureRunning()
+                return
+            }
+            guard self.queue.sync(execute: { self.shouldRun }) else { return }
+            do {
+                try self.startListeningOnMain(force: true)
+            } catch {
+                self.log.error("Speaker route failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
         if Thread.isMainThread {
             apply()
@@ -188,12 +237,14 @@ final class VoiceEngine {
     }
 
     func start() throws {
+        queue.sync { self.wantsCapture = false }
         try startFresh(force: false)
     }
 
     func stop() {
         queue.sync {
             shouldRun = false
+            wantsCapture = false
             tearDownEngineOnly()
             lastOverride = nil
         }
@@ -321,29 +372,97 @@ final class VoiceEngine {
     }
 
     private func startFreshOnMain(force: Bool) throws {
+        let capture = queue.sync { wantsCapture }
+        if capture {
+            try startCaptureOnMain(force: force)
+        } else {
+            try startListeningOnMain(force: force)
+        }
+    }
+
+    private func prepareCaptureOnMain() -> Bool {
+        guard queue.sync(execute: { shouldRun }) else { return false }
+        let already = queue.sync { wantsCapture && captureArmed && tapInstalled && engine?.isRunning == true }
+        if already { return true }
+        queue.sync { self.wantsCapture = true }
+        do {
+            try startCaptureOnMain(force: true)
+            return true
+        } catch {
+            queue.sync { self.wantsCapture = false }
+            reportFailure(Self.failureAlert(for: error, fallback: .failedToStart))
+            try? startListeningOnMain(force: true)
+            return false
+        }
+    }
+
+    private func endCaptureOnMain() {
+        micOpen.withLock { $0 = false }
+        waveArmed.store(0)
+        currentLevelMeter()?.hideMic()
+        queue.sync { self.wantsCapture = false }
+        guard queue.sync(execute: { shouldRun }) else { return }
+        let listening = queue.sync { !captureArmed && engine?.isRunning == true }
+        if listening && listeningCategoryMatches() { return }
+        do {
+            try startListeningOnMain(force: true)
+        } catch {
+            log.error("Playback restore failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func openCaptureGate() {
+        let armed = queue.sync { captureArmed && tapInstalled && engine?.isRunning == true }
+        guard armed else { return }
+        micOpen.withLock { $0 = true }
+        waveArmed.store(1)
+    }
+
+    private func startListeningOnMain(force: Bool) throws {
+        if !force {
+            let running = queue.sync {
+                shouldRun && !wantsCapture && !captureArmed && engine?.isRunning == true
+            }
+            if running && listeningCategoryMatches() {
+                engineOwnsSession = true
+                return
+            }
+        }
+        engineOwnsSession = true
+        queue.sync { self.tearDownEngineOnly() }
+        try activateListeningSession()
+        try queue.sync {
+            try self.buildPlaybackGraph()
+            self.shouldRun = true
+            self.captureArmed = false
+        }
+        log.info("Playback engine running")
+    }
+
+    private func startCaptureOnMain(force: Bool) throws {
         try requireMicrophonePermission()
         if !force {
-            let running = queue.sync { shouldRun && engine?.isRunning == true }
+            let running = queue.sync { shouldRun && wantsCapture && captureArmed && engine?.isRunning == true }
             if running {
                 engineOwnsSession = true
                 return
             }
         }
         engineOwnsSession = true
-
         var lastError: Error = VoiceEngineError.failedToStart
         var attempt = 0
         while attempt < 2 {
             attempt += 1
             do {
                 queue.sync { self.tearDownEngineOnly() }
-                try activateSession()
+                try activateCaptureSession()
                 try queue.sync {
-                    try self.buildAndStart()
+                    try self.buildCaptureGraph()
                     self.shouldRun = true
+                    self.captureArmed = true
                 }
                 applyOutputRoute(force: true)
-                log.info("Audio engine running mode=default")
+                log.info("Capture engine running mode=default")
                 return
             } catch VoiceEngineError.noInput where attempt == 1 {
                 lastError = VoiceEngineError.noInput
@@ -362,7 +481,11 @@ final class VoiceEngine {
                 break
             }
         }
-        queue.sync { self.shouldRun = false }
+        queue.sync {
+            self.shouldRun = false
+            self.wantsCapture = false
+            self.captureArmed = false
+        }
         throw lastError
     }
 
@@ -418,8 +541,37 @@ final class VoiceEngine {
         }
     }
 
-    private func activateSession() throws {
+    /// Playback unless Høyttaler is off and the only route is the built-in
+    /// receiver. That case stays `playAndRecord` so the earpiece can be
+    /// selected, without a tap or voice processing.
+    private func activateListeningSession() throws {
         let session = AVAudioSession.sharedInstance()
+        reportSessionReconfigured()
+        if wantsBuiltInReceiver(session) {
+            try session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.allowBluetoothHFP, .allowBluetoothA2DP]
+            )
+            try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
+        } else {
+            try session.setCategory(.playback, mode: .default, options: [])
+        }
+        engineOwnsSession = true
+        try? session.setPreferredIOBufferDuration(0.04)
+        try session.setActive(true)
+        if session.category == .playAndRecord {
+            try? session.overrideOutputAudioPort(.none)
+            lastOverride = .none
+        } else {
+            lastOverride = nil
+        }
+        reportSessionReconfigured()
+    }
+
+    private func activateCaptureSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        reportSessionReconfigured()
         try session.setCategory(
             .playAndRecord,
             mode: .default,
@@ -431,6 +583,18 @@ final class VoiceEngine {
         try session.setActive(true)
         applyOutputRoute()
         reportSessionReconfigured()
+    }
+
+    private func wantsBuiltInReceiver(_ session: AVAudioSession) -> Bool {
+        guard !useSpeaker else { return false }
+        let external = session.currentRoute.outputs.contains { Self.externalPorts.contains($0.portType) }
+        return !external
+    }
+
+    private func listeningCategoryMatches() -> Bool {
+        let session = AVAudioSession.sharedInstance()
+        if wantsBuiltInReceiver(session) { return session.category == .playAndRecord }
+        return session.category == .playback
     }
 
     private func activateIdleSessionOnMain() {
@@ -454,44 +618,30 @@ final class VoiceEngine {
         return options
     }
 
-    private func buildAndStart() throws {
+    /// Output graph only. Does not touch `inputNode`.
+    private func buildPlaybackGraph() throws {
+        let nodes = try makeOutputGraph()
+        nodes.engine.prepare()
+        try nodes.engine.start()
+        try finishPlayback(voice: nodes.voice, beep: nodes.beep)
+    }
+
+    private func buildCaptureGraph() throws {
         let session = AVAudioSession.sharedInstance()
         guard session.category == .playAndRecord else {
             log.error("Refusing to open the microphone before playAndRecord is active")
             throw VoiceEngineError.failedToStart
         }
-
-        let engine = AVAudioEngine()
-        let voice = AVAudioPlayerNode()
-        let beep = AVAudioPlayerNode()
-        engine.attach(voice)
-        engine.attach(beep)
-
-        let rate = session.sampleRate
-        let sampleRate = rate > 0 ? rate : 48_000
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
-            throw VoiceEngineError.failedToStart
-        }
-        engine.connect(voice, to: engine.mainMixerNode, format: format)
-        engine.connect(beep, to: engine.mainMixerNode, format: format)
-        self.engine = engine
-        self.voicePlayer = voice
-        self.beepPlayer = beep
-        self.playbackFormat = format
-        self.tapInstalled = false
-        self.encoder = nil
-        self.encoderInputKey = nil
-        self.burstStarted = false
-        self.primeBuffers.removeAll()
-        self.primeTimer?.cancel()
-        self.primeTimer = nil
-
+        let nodes = try makeOutputGraph()
+        let engine = nodes.engine
         if !voiceProcessingDisabled {
             do {
                 try engine.inputNode.setVoiceProcessingEnabled(true)
+                voiceProcessingOn = true
                 log.info("Voice processing on")
             } catch {
                 voiceProcessingDisabled = true
+                voiceProcessingOn = false
                 log.error("Voice processing unavailable: \(error.localizedDescription, privacy: .public)")
             }
         }
@@ -509,23 +659,72 @@ final class VoiceEngine {
             self.handleInput(buffer)
         }
         tapInstalled = true
-
-        engine.mainMixerNode.outputVolume = 1
-        voice.volume = 1
         engine.prepare()
         try engine.start()
+        try finishPlayback(voice: nodes.voice, beep: nodes.beep)
+    }
 
+    private func makeOutputGraph() throws -> (engine: AVAudioEngine, voice: AVAudioPlayerNode, beep: AVAudioPlayerNode) {
+        let session = AVAudioSession.sharedInstance()
+        let engine = AVAudioEngine()
+        let voice = AVAudioPlayerNode()
+        let beep = AVAudioPlayerNode()
+        let keep = AVAudioPlayerNode()
+        engine.attach(voice)
+        engine.attach(beep)
+        engine.attach(keep)
+        let rate = session.sampleRate
+        let sampleRate = rate > 0 ? rate : 48_000
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
+            throw VoiceEngineError.failedToStart
+        }
+        engine.connect(voice, to: engine.mainMixerNode, format: format)
+        engine.connect(beep, to: engine.mainMixerNode, format: format)
+        engine.connect(keep, to: engine.mainMixerNode, format: format)
+        self.engine = engine
+        self.voicePlayer = voice
+        self.beepPlayer = beep
+        self.keepAlivePlayer = keep
+        self.playbackFormat = format
+        self.tapInstalled = false
+        self.voiceProcessingOn = false
+        self.encoder = nil
+        self.encoderInputKey = nil
+        self.burstStarted = false
+        self.primeBuffers.removeAll()
+        self.primeTimer?.cancel()
+        self.primeTimer = nil
+        engine.mainMixerNode.outputVolume = 1
+        voice.volume = 1
+        return (engine, voice, beep)
+    }
+
+    private func finishPlayback(voice: AVAudioPlayerNode, beep: AVAudioPlayerNode) throws {
         let render = voice.outputFormat(forBus: 0)
         if render.sampleRate > 0, render.channelCount > 0 {
-            self.playbackFormat = render
+            playbackFormat = render
         }
-        guard let playbackFormat = self.playbackFormat,
+        guard let playbackFormat,
               let decoder = FormatConverter(from: Self.wireFormat, to: playbackFormat) else {
             throw VoiceEngineError.failedToStart
         }
         self.decoder = decoder
         voice.play()
         beep.play()
+        armKeepAlive()
+    }
+
+    /// A looping silent buffer keeps the output IO running between transmissions.
+    private func armKeepAlive() {
+        guard let keep = keepAlivePlayer else { return }
+        let output = keep.outputFormat(forBus: 0)
+        let format = Self.isUsable(output) ? output : playbackFormat
+        guard let format, format.sampleRate > 0 else { return }
+        let frames = AVAudioFrameCount(max(256, format.sampleRate / 10))
+        guard let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return }
+        silence.frameLength = frames
+        keep.scheduleBuffer(silence, at: nil, options: .loops)
+        if !keep.isPlaying { keep.play() }
     }
 
     /// `outputFormat` is 0 Hz on a real iPhone when the input node was realized
@@ -553,18 +752,32 @@ final class VoiceEngine {
     }
 
     private func tearDownEngineOnly() {
-        if tapInstalled, let engine {
-            engine.inputNode.removeTap(onBus: 0)
+        if let engine, tapInstalled || voiceProcessingOn {
+            let input = engine.inputNode
+            if tapInstalled {
+                input.removeTap(onBus: 0)
+            }
+            tapInstalled = false
+            engine.stop()
+            if voiceProcessingOn {
+                try? input.setVoiceProcessingEnabled(false)
+            }
+        } else {
+            engine?.stop()
         }
         tapInstalled = false
+        voiceProcessingOn = false
+        captureArmed = false
         currentLevelMeter()?.hideMic()
         currentLevelMeter()?.hideRemote()
         engine?.stop()
         voicePlayer?.stop()
         beepPlayer?.stop()
+        keepAlivePlayer?.stop()
         engine = nil
         voicePlayer = nil
         beepPlayer = nil
+        keepAlivePlayer = nil
         decoder = nil
         encoder = nil
         encoderInputKey = nil
@@ -981,6 +1194,7 @@ final class VoiceEngine {
     }
 
     private func outputOptionsNeedUpdate(_ session: AVAudioSession) -> Bool {
+        guard wantsCapture else { return false }
         if session.category != .playAndRecord { return true }
         let options = session.categoryOptions
         if options.contains(.allowBluetoothHFP) == false { return true }
@@ -1018,8 +1232,27 @@ final class VoiceEngine {
             if current > 0, rate > 0, abs(rate - current) > 1 {
                 self.restartAudio(.routeChanged)
             } else {
-                self.applyOutputRoute()
+                self.refreshRouteAfterChange()
             }
+        }
+    }
+
+    private func refreshRouteAfterChange() {
+        let refresh: () -> Void = { [weak self] in
+            guard let self else { return }
+            let capture = self.queue.sync { self.wantsCapture }
+            if capture {
+                self.applyOutputRoute()
+                return
+            }
+            guard self.queue.sync(execute: { self.shouldRun }) else { return }
+            guard !self.listeningCategoryMatches() else { return }
+            try? self.startListeningOnMain(force: true)
+        }
+        if Thread.isMainThread {
+            refresh()
+        } else {
+            DispatchQueue.main.async(execute: refresh)
         }
     }
 
