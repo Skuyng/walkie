@@ -9,7 +9,7 @@ npm install
 npm start
 ```
 
-Serveren lytter på `PORT` fra miljøet, ellers port 8080. Åpne adressen i nettleseren og tillat mikrofon.
+Serveren lytter på `PORT` fra miljøet, ellers port 8080. Åpne adressen i nettleseren og tillat mikrofon. `GET /version` svarer med git-revisjonen fra `RENDER_GIT_COMMIT` når Render har deployet den. `node scripts/relay-check.js wss://walkie-bc0z.onrender.com` sjekker at to klienter med samme navn hører hverandre i en passordgruppe.
 
 ## iPhone
 

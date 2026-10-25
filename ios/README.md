@@ -51,8 +51,8 @@ Tekst (JSON):
 - til serveren: `{"t":"groups","name":"…","talk":"…","groups":[{"room":"…","password":"…","create":false,"listen":true}]}`
 - til serveren, etter `groups`: `{"t":"join","name":"…","room":"…","password":"…"}` slik at en eldre server fortsatt legger deg i én kanal
 - til serveren: `{"t":"start","room":"…"}` og `{"t":"stop","room":"…"}`
-- fra serveren: `{"t":"users","room":"…","users":["…"]}` bare til dem som har riktig passord for gruppen
-- fra serveren: `{"t":"start","name":"…","room":"…"}` og `{"t":"stop","name":"…","room":"…"}`
+- fra serveren: `{"t":"users","room":"…","users":["…"],"members":[{"id":"…","name":"…"}],"self":"…"}` bare til dem som har riktig passord. `members` er én rad per tilkobling, så to med samme navn vises begge. `users` er fortsatt navnelisten.
+- fra serveren: `{"t":"start","name":"…","room":"…","id":"…"}` og `{"t":"stop","name":"…","room":"…","id":"…"}`
 - fra serveren: `{"t":"error","room":"…","error":"Feil passord"}` når passordet er feil
 
 En eldre klient som bare sender `join` uten `groups` blir fortsatt med i én gruppe. Lyd sendes aldri til en socket som ikke er godkjent for gruppen, og bare til dem som lytter.
@@ -63,7 +63,7 @@ Nettleseren plukker nærmeste sample når den nedsampler. iOS bruker `AVAudioCon
 
 ## Bakgrunn og låst skjerm
 
-`Info.plist` har `UIBackgroundModes` satt til `audio`. Lydøkten er `playAndRecord` med modus `.default` (ikke `.voiceChat`, som demper høyttaleren). Bluetooth-headset bruker `allowBluetoothHFP`, og `allowBluetoothA2DP` er også slått på. **Høyttaler** på legger til `defaultToSpeaker` og tvinger høyttaler. Av lar lyden gå i ørepluggen når det ikke er et hodesett. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle, slik at innkommende tale kan fortsette når skjermen er låst.
+`Info.plist` har `UIBackgroundModes` satt til `audio`. Lydøkten er `playAndRecord` med modus `.default` (ikke `.voiceChat`, som demper høyttaleren). Bluetooth-headset bruker `allowBluetoothHFP`. A2DP brukes ikke, fordi det tar lyden vekk fra høyttaleren i en samtaleøkt. **Høyttaler** på legger til `defaultToSpeaker` og tvinger høyttaler etter at lyden er startet. Av lar lyden gå i ørepluggen når det ikke er et hodesett. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle, slik at innkommende tale kan fortsette når skjermen er låst.
 
 Den oransje mikrofonprikken lyser mens du er tilkoblet, fordi appen holder lydøkten i gang for å kunne ta imot tale i bakgrunnen. Du sender ikke lyd før du holder knappen inne, eller holder volum opp inne.
 

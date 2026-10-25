@@ -16,7 +16,9 @@ final class WalkieSession: ObservableObject {
     @Published var talkGroup: String
     @Published private(set) var linkState: LinkState = .disconnected
     @Published private(set) var statusText = "Ikke tilkoblet"
-    @Published private(set) var memberNames: [String: [String]] = [:]
+    @Published private(set) var membersByRoom: [String: [RoomMember]] = [:]
+    @Published private(set) var selfID = ""
+    @Published private(set) var joinProblems: [String: String] = [:]
     @Published private(set) var talkers: [Talker] = []
     @Published private(set) var isTalking = false
     @Published private(set) var audioReady = false
@@ -24,10 +26,6 @@ final class WalkieSession: ObservableObject {
     @Published private(set) var suggestsSettings = false
     @Published private(set) var hasConnectedOnce = false
     @Published var speakerphone: Bool
-    #if DEBUG
-    @Published private(set) var volumeEventCount = 0
-    @Published private(set) var lastVolumeEvent = Date.distantPast
-    #endif
 
     var canTransmit: Bool {
         linkState == .connected && audioReady
@@ -41,17 +39,13 @@ final class WalkieSession: ObservableObject {
                 order.append(talker.room)
                 namesByRoom[talker.room] = []
             }
-            if namesByRoom[talker.room]?.contains(talker.name) == false {
-                namesByRoom[talker.room, default: []].append(talker.name)
-            }
+            namesByRoom[talker.room, default: []].append(talker.name)
         }
-        if isTalking, !talkGroup.isEmpty, !name.isEmpty {
+        if isTalking, !talkGroup.isEmpty, !name.isEmpty, !localTalkerListed {
             if namesByRoom[talkGroup] == nil {
                 order.append(talkGroup)
             }
-            if namesByRoom[talkGroup]?.contains(name) != true {
-                namesByRoom[talkGroup, default: []].append(name)
-            }
+            namesByRoom[talkGroup, default: []].append(name)
         }
         let parts = order.compactMap { roomID -> String? in
             guard let names = namesByRoom[roomID], !names.isEmpty else { return nil }
@@ -62,25 +56,50 @@ final class WalkieSession: ObservableObject {
         return parts.joined(separator: " · ") + " snakker"
     }
 
+    var centerStatus: String {
+        if linkState != .connected { return statusText }
+        let count = onlineMembers(in: talkGroup).count
+        if count == 0 { return "Ingen pålogget" }
+        if count == 1 { return "1 pålogget" }
+        return "\(count) pålogget"
+    }
+
+    func joinProblem(for groupID: String) -> String {
+        joinProblems[groupID] ?? ""
+    }
+
     func onlineMembers(in groupID: String) -> [OnlineMember] {
-        var names = memberNames[groupID] ?? []
-        for talker in talkers where talker.room == groupID && !names.contains(talker.name) {
-            names.append(talker.name)
+        var list = membersByRoom[groupID] ?? []
+        for talker in talkers where talker.room == groupID && !list.contains(where: { $0.id == talker.id }) {
+            list.append(RoomMember(id: talker.id, name: talker.name))
         }
-        if isTalking, groupID == talkGroup, !name.isEmpty, !names.contains(name) {
-            names.append(name)
+        if isTalking, groupID == talkGroup, !name.isEmpty, !list.contains(where: { $0.id == localMemberID }) {
+            list.append(RoomMember(id: localMemberID, name: name))
         }
-        return names.map { person in
-            let remote = talkers.contains { $0.name == person && $0.room == groupID }
-            let local = isTalking && groupID == talkGroup && person == name
-            return OnlineMember(name: person, talking: remote || local)
+        return list.map { member in
+            let remote = talkers.contains { $0.id == member.id && $0.room == groupID }
+            let local = isTalking && groupID == talkGroup && member.id == localMemberID
+            let legacy = isTalking && groupID == talkGroup && selfID.isEmpty && member.name == name
+            return OnlineMember(id: member.id, name: member.name, talking: remote || local || legacy)
         }
     }
 
     func presenceCaption(for groupID: String) -> String {
         guard linkState == .connected else { return "" }
+        if !joinProblem(for: groupID).isEmpty { return "" }
         if onlineMembers(in: groupID).isEmpty { return "Ingen pålogget" }
         return ""
+    }
+
+    private var localMemberID: String {
+        selfID.isEmpty ? "local" : selfID
+    }
+
+    private var localTalkerListed: Bool {
+        if selfID.isEmpty {
+            return talkers.contains { $0.room == talkGroup && $0.name == name }
+        }
+        return talkers.contains { $0.room == talkGroup && $0.id == selfID }
     }
 
     private let defaults = UserDefaults.standard
@@ -203,10 +222,11 @@ final class WalkieSession: ObservableObject {
     func removeGroup(_ id: String) {
         groups.removeAll { $0.id == id }
         GroupPasswordStore.delete(account: id)
-        memberNames[id] = nil
+        membersByRoom[id] = nil
+        joinProblems[id] = nil
         let leaving = talkers.filter { $0.room == id }
         for talker in leaving {
-            removeTalker(name: talker.name, room: talker.room)
+            removeTalker(id: talker.id, room: talker.room)
         }
         if talkGroup == id {
             talkGroup = groups.first?.id ?? ""
@@ -267,7 +287,8 @@ final class WalkieSession: ObservableObject {
         savePreferences()
         activeURL = url
         shouldReconnect = true
-        memberNames = [:]
+        membersByRoom = [:]
+        selfID = ""
         talkers = []
         linkState = .connecting
         statusText = "Kobler til…"
@@ -286,8 +307,7 @@ final class WalkieSession: ObservableObject {
         engine.stop()
         audioReady = false
         hasConnectedOnce = false
-        memberNames = [:]
-        talkers = []
+        clearPresence()
         linkState = .disconnected
         statusText = "Ikke tilkoblet"
         prepareVolumeHUD()
@@ -314,17 +334,8 @@ final class WalkieSession: ObservableObject {
                     self.endTransmitting()
                 }
             }
-            #if DEBUG
-            volumeButtons.onVolumeEvent = { [weak self] in
-                self?.recordVolumeEvent()
-            }
-            #endif
         } else {
             volumeButtons.stop()
-            #if DEBUG
-            volumeEventCount = 0
-            lastVolumeEvent = .distantPast
-            #endif
         }
     }
 
@@ -335,13 +346,6 @@ final class WalkieSession: ObservableObject {
     func detachSystemVolumeView(_ view: MPVolumeView) {
         volumeButtons.detach(view)
     }
-
-    #if DEBUG
-    private func recordVolumeEvent() {
-        volumeEventCount += 1
-        lastVolumeEvent = Date()
-    }
-    #endif
 
     func resumeAudioIfNeeded() {
         guard shouldReconnect else { return }
@@ -389,8 +393,7 @@ final class WalkieSession: ObservableObject {
         shouldReconnect = false
         audioReady = false
         engine.stop()
-        memberNames = [:]
-        talkers = []
+        clearPresence()
         linkState = .disconnected
         statusText = "Ikke tilkoblet"
         suggestsSettings = settings
@@ -408,7 +411,8 @@ final class WalkieSession: ObservableObject {
     private func handleClose() {
         let somebodyTalking = !talkers.isEmpty
         talkers.removeAll()
-        memberNames = [:]
+        membersByRoom = [:]
+        selfID = ""
         if somebodyTalking {
             engine.playTalkBoundaryBeep(isStart: false)
         }
@@ -432,39 +436,66 @@ final class WalkieSession: ObservableObject {
 
     private func handle(_ event: ServerEvent) {
         switch event {
-        case .users(let room, let names):
+        case .users(let room, let members, let selfID):
             let key = room.isEmpty ? talkGroup : room
             guard !key.isEmpty else { return }
-            memberNames[key] = names
-            let gone = talkers.filter { $0.room == key && !names.contains($0.name) }
-            for talker in gone {
-                removeTalker(name: talker.name, room: talker.room)
+            if !selfID.isEmpty { self.selfID = selfID }
+            membersByRoom[key] = members
+            if includesSelf(members) {
+                joinProblems[key] = nil
+            } else if linkState == .connected {
+                joinProblems[key] = "Ikke med i gruppen"
             }
-        case .talkStarted(let name, let room):
-            addTalker(name: name, room: room.isEmpty ? talkGroup : room)
-        case .talkStopped(let name, let room):
-            removeTalker(name: name, room: room.isEmpty ? talkGroup : room)
+            let gone = talkers.filter { talker in
+                guard talker.room == key else { return false }
+                if members.contains(where: { $0.id == talker.id }) { return false }
+                if talker.id == talker.name && members.contains(where: { $0.name == talker.name }) { return false }
+                return true
+            }
+            for talker in gone {
+                removeTalker(id: talker.id, room: talker.room)
+            }
+        case .talkStarted(let name, let room, let id):
+            addTalker(id: id, name: name, room: room.isEmpty ? talkGroup : room)
+        case .talkStopped(let name, let room, let id):
+            removeTalker(id: id.isEmpty ? name : id, room: room.isEmpty ? talkGroup : room)
         case .rejected(let room, let message):
+            let text = message.isEmpty ? "Feil passord" : message
+            if !room.isEmpty {
+                joinProblems[room] = text
+            }
             let label = groups.first { $0.id == room }?.name ?? room
             if label.isEmpty {
-                errorMessage = message.isEmpty ? "Feil passord" : message
-            } else if message == "Feil passord" || message.isEmpty {
-                errorMessage = "Feil passord for \(label)"
+                errorMessage = text
             } else {
-                errorMessage = message
+                errorMessage = "\(label): \(text)"
             }
         }
     }
 
-    private func addTalker(name: String, room: String) {
+    private func includesSelf(_ members: [RoomMember]) -> Bool {
+        if !selfID.isEmpty, members.contains(where: { $0.id == selfID }) { return true }
+        if selfID.isEmpty, members.contains(where: { $0.name == name }) { return true }
+        return false
+    }
+
+    private func clearPresence() {
+        membersByRoom = [:]
+        selfID = ""
+        talkers = []
+        joinProblems = [:]
+    }
+
+    private func addTalker(id: String, name: String, room: String) {
         guard !room.isEmpty, !name.isEmpty else { return }
-        guard !talkers.contains(where: { $0.name == name && $0.room == room }) else { return }
-        talkers.append(Talker(name: name, room: room))
+        let key = id.isEmpty ? name : id
+        guard !talkers.contains(where: { $0.id == key && $0.room == room }) else { return }
+        talkers.append(Talker(id: key, name: name, room: room))
         engine.playTalkBoundaryBeep(isStart: true)
     }
 
-    private func removeTalker(name: String, room: String) {
-        guard let index = talkers.firstIndex(where: { $0.name == name && $0.room == room }) else { return }
+    private func removeTalker(id: String, room: String) {
+        guard let index = talkers.firstIndex(where: { $0.id == id && $0.room == room }) else { return }
         talkers.remove(at: index)
         engine.playTalkBoundaryBeep(isStart: false)
         if talkers.isEmpty {
@@ -644,15 +675,21 @@ struct WalkieGroup: Codable, Identifiable, Equatable {
     }
 }
 
-struct Talker: Equatable {
+struct RoomMember: Codable, Equatable, Identifiable {
+    var id: String
+    var name: String
+}
+
+struct Talker: Equatable, Identifiable {
+    var id: String
     var name: String
     var room: String
 }
 
 struct OnlineMember: Identifiable, Equatable {
+    var id: String
     var name: String
     var talking: Bool
-    var id: String { name }
 }
 
 enum GroupPasswordStore {

@@ -43,9 +43,6 @@ final class VolumeButtonMonitor {
     /// Blocks a new hold while the post-release park write is still echoing.
     private var parkEchoUntil = Date.distantPast
     private var notificationTokens: [NSObjectProtocol] = []
-    #if DEBUG
-    var onVolumeEvent: (@MainActor () -> Void)?
-    #endif
     private var holdToken = 0
     private var resetGeneration = 0
     private var stoppingHold = false
@@ -149,9 +146,6 @@ final class VolumeButtonMonitor {
     /// starts a hold; later repeats keep it alive. Parking is not a press.
     private func handleVolumeNotification(reason: String, volume: Float?) {
         guard enabled, ready else { return }
-        #if DEBUG
-        onVolumeEvent?()
-        #endif
         let value = volume ?? AVAudioSession.sharedInstance().outputVolume
         let previous = lastVolume
         lastVolume = value

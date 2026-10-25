@@ -12,6 +12,7 @@ input,button{font-size:18px;padding:12px;border-radius:10px;border:0;margin:6px;
 .person{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:16px}
 .dot{width:8px;height:8px;border-radius:50%;background:#3d3;display:inline-block}
 .person.talk{color:#fc0;font-weight:700}
+.bad{color:#f66;font-weight:700;margin:4px 0}
 .tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:15px}
 .tools button{width:auto;margin:0;padding:8px 10px}
 label.chk{display:flex;align-items:center;gap:6px}
@@ -32,6 +33,8 @@ let passwords=loadPass('gpw');
 let talk=localStorage.talk||'';
 let members={};
 let speakers={};
+let problems={};
+let myId='';
 let ws,ctx,stream,proc,src,talking=false,playT=0,myName='';
 $('name').value=localStorage.n||'';
 function loadGroups(){try{const v=JSON.parse(localStorage.groups||'[]');return Array.isArray(v)?v:[]}catch{return[]}}
@@ -59,18 +62,26 @@ function render(){
   if($('liveGroups'))$('liveGroups').innerHTML=groups.map(drawGroup).join('');
   document.querySelectorAll('[data-act]').forEach(el=>el.onclick=onTool);
 }
-function namesFor(g){
-  const list=(members[g.id]||[]).slice();
-  Object.keys(speakers[g.id]||{}).forEach(name=>{if(list.indexOf(name)<0)list.push(name)});
-  if(talking&&g.id===talk&&myName&&list.indexOf(myName)<0)list.push(myName);
+function peopleFor(g){
+  const list=(members[g.id]||[]).map(person=>({id:String(person.id),name:String(person.name||'')}));
+  Object.keys(speakers[g.id]||{}).forEach(id=>{
+    if(list.some(person=>person.id===id))return;
+    list.push({id,name:speakers[g.id][id]||id});
+  });
+  if(talking&&g.id===talk&&myName){
+    const localId=myId||'local';
+    if(!list.some(person=>person.id===localId))list.push({id:localId,name:myName});
+  }
   return list;
 }
 function drawGroup(g){
   const online=ws&&ws.readyState===1;
-  const people=!online?'':namesFor(g).map(name=>{
-    const hot=(speakers[g.id]&&speakers[g.id][name])||(talking&&g.id===talk&&name===myName);
-    return '<div class="person'+(hot?' talk':'')+'"><span class="dot"></span>'+escapeHtml(name)+(hot?' snakker':'')+'</div>';
-  }).join('')||'<div class="person">Ingen pålogget</div>';
+  const problem=problems[g.id]?'<div class="bad">'+escapeHtml(problems[g.id])+'</div>':'';
+  const rows=peopleFor(g).map(person=>{
+    const hot=(speakers[g.id]&&speakers[g.id][person.id])||(talking&&g.id===talk&&(person.id===myId||(!myId&&person.name===myName)));
+    return '<div class="person'+(hot?' talk':'')+'"><span class="dot"></span>'+escapeHtml(person.name)+(hot?' snakker':'')+'</div>';
+  }).join('');
+  const people=online?(problem+(rows||(problem?'':'<div class="person">Ingen pålogget</div>'))):problem;
   const mic=g.id===talk?'Snakk':'Velg';
   return '<div class="group"><h3>'+escapeHtml(g.name)+(passwords[g.id]?' 🔒':'')+'</h3><div class="tools"><button data-act="talk" data-id="'+g.id+'">'+mic+'</button><label class="chk"><input data-act="listen" data-id="'+g.id+'" type="checkbox"'+(g.listen?' checked':'')+'> Lytt</label><button data-act="drop" data-id="'+g.id+'">Fjern</button></div>'+people+'</div>';
 }
@@ -96,7 +107,7 @@ function sendState(){
 function whoText(){
   const lines=[];
   Object.keys(speakers).forEach(room=>{
-    const names=Object.keys(speakers[room]||{});
+    const names=Object.keys(speakers[room]||{}).map(id=>speakers[room][id]);
     if(!names.length)return;
     const label=(groups.find(g=>g.id===room)||{name:room}).name;
     lines.push(names.join(', ')+' i '+label);
@@ -125,16 +136,31 @@ function connect(){
   ws.onmessage=e=>{
     if(typeof e.data!=='string')return play(e.data);
     const m=JSON.parse(e.data);
-    if(m.t==='error'){alert(m.error||'Feil passord');return}
+    if(m.t==='error'){
+      const room=m.room||talk;
+      const text=m.error||'Feil passord';
+      if(room)problems[room]=text;
+      alert((room?((groups.find(g=>g.id===room)||{name:room}).name+': '):'')+text);
+      render();
+      return;
+    }
     if(m.t==='users'){
       const room=m.room||talk;
-      members[room]=Array.isArray(m.users)?m.users:[];
+      if(m.self)myId=m.self;
+      const list=Array.isArray(m.members)&&m.members.length
+        ?m.members.map((person,index)=>({id:String(person.id||index),name:String(person.name||'')})).filter(person=>person.name)
+        :(Array.isArray(m.users)?m.users:[]).map((name,index)=>({id:index+'|'+name,name:String(name)}));
+      members[room]=list;
+      const here=myId?list.some(person=>person.id===myId):list.some(person=>person.name===myName);
+      if(here)delete problems[room];
+      else if(room)problems[room]=problems[room]||'Ikke med i gruppen';
       render();
     }
     if(m.t==='start'||m.t==='stop'){
       const room=m.room||talk;
+      const id=m.id||m.name;
       speakers[room]=speakers[room]||{};
-      if(m.t==='start')speakers[room][m.name]=true;else delete speakers[room][m.name];
+      if(m.t==='start')speakers[room][id]=m.name;else delete speakers[room][id];
       whoText();render();
     }
   };

@@ -3,9 +3,9 @@ import os
 
 /// Events from the walkie server. Binary audio is delivered separately.
 enum ServerEvent {
-    case users(room: String, names: [String])
-    case talkStarted(name: String, room: String)
-    case talkStopped(name: String, room: String)
+    case users(room: String, members: [RoomMember], selfID: String)
+    case talkStarted(name: String, room: String, id: String)
+    case talkStopped(name: String, room: String, id: String)
     case rejected(room: String, message: String)
 }
 
@@ -211,18 +211,36 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
               let message = try? JSONDecoder().decode(Inbound.self, from: data) else { return nil }
         switch message.t {
         case "users":
-            return .users(room: message.room ?? "", names: message.users ?? [])
+            return .users(
+                room: message.room ?? "",
+                members: members(from: message),
+                selfID: message.me ?? ""
+            )
         case "start":
             guard let name = message.name else { return nil }
-            return .talkStarted(name: name, room: message.room ?? "")
+            return .talkStarted(name: name, room: message.room ?? "", id: message.id ?? name)
         case "stop":
             guard let name = message.name else { return nil }
-            return .talkStopped(name: name, room: message.room ?? "")
+            return .talkStopped(name: name, room: message.room ?? "", id: message.id ?? name)
         case "error":
             let messageText = message.error ?? "Feil passord"
             return .rejected(room: message.room ?? "", message: messageText)
         default:
             return nil
+        }
+    }
+
+    /// Prefer the server's per-socket ids. An older server only sends names;
+    /// index keeps two people with the same name as two rows.
+    private static func members(from message: Inbound) -> [RoomMember] {
+        if let members = message.members {
+            let parsed = members.filter { !$0.id.isEmpty && !$0.name.isEmpty }
+            if !parsed.isEmpty { return parsed }
+        }
+        return (message.users ?? []).enumerated().compactMap { index, name in
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return RoomMember(id: "\(index)|\(trimmed)", name: trimmed)
         }
     }
 }
@@ -261,6 +279,14 @@ private struct Inbound: Decodable {
     var t: String
     var name: String?
     var users: [String]?
+    var members: [RoomMember]?
     var room: String?
     var error: String?
+    var id: String?
+    var me: String?
+
+    enum CodingKeys: String, CodingKey {
+        case t, name, users, members, room, error, id
+        case me = "self"
+    }
 }

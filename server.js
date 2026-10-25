@@ -58,8 +58,20 @@ function secretMatches(password, record) {
   return crypto.timingSafeEqual(actual, expected);
 }
 
+function gitSha() {
+  return process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || process.env.SOURCE_VERSION || '';
+}
+
 const srv = http.createServer((q, r) => {
   let p = q.url.split('?')[0];
+  if (p === '/version') {
+    const sha = gitSha();
+    r.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-cache'
+    });
+    return r.end(JSON.stringify({ sha, commit: sha }));
+  }
   if (p === '/') p = '/index.html';
   const f = path.join(__dirname, 'public', path.normalize(p));
   fs.readFile(f, (e, d) => {
@@ -97,22 +109,29 @@ function bc(room, data, except, bin) {
   }
 }
 
-function memberNames(room) {
-  const names = [];
+function memberList(room) {
+  const members = [];
   for (const client of wss.clients) {
-    if (client.readyState === 1 && authed(client, room) && client.name) names.push(client.name);
+    if (client.readyState === 1 && authed(client, room) && client.name && client.peerId) {
+      members.push({ id: client.peerId, name: client.name });
+    }
   }
-  return names;
+  return members;
 }
 
-/// Online members of one room. Only sockets authorized for that room receive it.
+/// Online members of one room, one entry per socket. Only authorized sockets receive it.
 function sendUsers(room) {
-  bc(room, JSON.stringify({ t: 'users', room, users: memberNames(room) }), null, false);
+  const members = memberList(room);
+  const users = members.map((member) => member.name);
+  for (const client of wss.clients) {
+    if (client.readyState !== 1 || !authed(client, room)) continue;
+    client.send(JSON.stringify({ t: 'users', room, users, members, self: client.peerId }));
+  }
 }
 
-function sendError(ws, room) {
+function sendError(ws, room, error) {
   if (ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ t: 'error', room, error: 'Feil passord' }));
+  ws.send(JSON.stringify({ t: 'error', room, error: error || 'Feil passord' }));
 }
 
 function evictOthers(room, except) {
@@ -186,7 +205,7 @@ function applyGroups(ws, message) {
   for (const room of affected) sendUsers(room);
   for (const room of prevListen) {
     if (!nextListen.has(room) && ws.name) {
-      bc(room, JSON.stringify({ t: 'stop', name: ws.name, room }), null, false);
+      bc(room, JSON.stringify({ t: 'stop', name: ws.name, room, id: ws.peerId }), null, false);
     }
   }
 }
@@ -220,6 +239,7 @@ function applyLegacyJoin(ws, message) {
 
 wss.on('connection', (ws) => {
   ws.isAlive = true;
+  ws.peerId = crypto.randomBytes(8).toString('hex');
   ws.auth = new Set();
   ws.rooms = new Set();
   ws.talk = '';
@@ -267,9 +287,13 @@ wss.on('connection', (ws) => {
     }
     if (message.t === 'start' || message.t === 'stop') {
       const room = normRoom(message.room) || ws.talk;
-      if (!room || !ws.name || !authed(ws, room)) return;
+      if (!room || !ws.name) return;
+      if (!authed(ws, room)) {
+        if (message.t === 'start') sendError(ws, room, 'Ikke med i gruppen');
+        return;
+      }
       if (ws.talk && ws.talk !== room) return;
-      bc(room, JSON.stringify({ t: message.t, name: ws.name, room }), ws, false);
+      bc(room, JSON.stringify({ t: message.t, name: ws.name, room, id: ws.peerId }), ws, false);
     }
   });
   ws.on('close', () => {
@@ -278,7 +302,7 @@ wss.on('connection', (ws) => {
     ws.auth = new Set();
     ws.rooms = new Set();
     for (const room of rooms) {
-      if (name) bc(room, JSON.stringify({ t: 'stop', name, room }), null, false);
+      if (name) bc(room, JSON.stringify({ t: 'stop', name, room, id: ws.peerId }), null, false);
       sendUsers(room);
     }
   });

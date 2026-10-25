@@ -146,64 +146,23 @@ struct ContentView: View {
 
     private var talkScreen: some View {
         GeometryReader { geo in
-            let side = min(geo.size.width - 48, max(200, geo.size.height - 360))
-            GlassEffectContainer(spacing: 12) {
-                VStack(spacing: 16) {
-                    Label(talkCaption, systemImage: "dot.radiowaves.left.and.right")
-                        .font(.headline)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .glassEffect(.regular, in: Capsule())
-
-                    ScrollView {
-                        GroupList(session: session)
-                    }
-                    .frame(maxHeight: 200)
-
-                    Label(session.statusText, systemImage: statusSymbol)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .symbolRenderingMode(.hierarchical)
-
+            let side = min(geo.size.width - 64, max(220, geo.size.height - 240))
+            GlassEffectContainer(spacing: 16) {
+                VStack(spacing: 18) {
+                    TalkGroupPill(title: talkCaption, action: openGroups)
+                    JoinBanner(text: session.joinProblem(for: session.talkGroup))
+                    Spacer(minLength: 0)
                     speakerRow
-                        .frame(minHeight: 32)
-
-                    Spacer(minLength: 8)
-
                     talkButton(side: side)
-
-                    Spacer(minLength: 8)
-
-                    Label("Hold volum opp inne for å snakke", systemImage: "speaker.wave.2.fill")
-                        .font(.footnote)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.secondary)
-
-                    #if DEBUG
-                    volumeDebugLine()
-                    #endif
-
-                    speakerphoneToggle
-
-                    HStack(spacing: 16) {
-                        Button {
-                            showGroups = true
-                        } label: {
-                            Label("Grupper", systemImage: "person.3.fill")
-                        }
-                        .buttonStyle(.glass)
-
-                        Button(action: enterDarkMode) {
-                            Label("Mørk modus", systemImage: "moon.fill")
-                        }
-                        .buttonStyle(.glass)
-                        .accessibilityHint("Svart skjerm med lav lysstyrke. Trykk skjermen for å avslutte.")
-
-                        Button(role: .destructive, action: session.disconnect) {
-                            Label("Koble fra", systemImage: "phone.down.fill")
-                        }
-                        .buttonStyle(.glass)
-                    }
+                    CenterStatusLine(text: session.centerStatus, symbol: statusSymbol)
+                    Spacer(minLength: 0)
+                    TalkBottomBar(
+                        speakerOn: session.speakerphone,
+                        onSpeaker: toggleSpeaker,
+                        onDark: enterDarkMode,
+                        onGroups: openGroups,
+                        onDisconnect: disconnectTapped
+                    )
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)
@@ -212,15 +171,16 @@ struct ContentView: View {
         }
     }
 
-    private var speakerphoneToggle: some View {
-        Toggle(isOn: $session.speakerphone) {
-            Label("Høyttaler", systemImage: "speaker.wave.2.fill")
-        }
-        .font(.body.weight(.medium))
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .glassEffect(.regular, in: Capsule())
-        .accessibilityHint("På bruker høyttaler. Av bruker ørepluggen, unntatt når hodetelefoner er koblet til.")
+    private func openGroups() {
+        showGroups = true
+    }
+
+    private func toggleSpeaker() {
+        session.speakerphone.toggle()
+    }
+
+    private func disconnectTapped() {
+        session.disconnect()
     }
 
     private var speakerRow: some View {
@@ -302,27 +262,6 @@ struct ContentView: View {
         }
     }
 
-    #if DEBUG
-    private func volumeDebugText(at date: Date) -> String {
-        let elapsed: String
-        if session.volumeEventCount == 0 {
-            elapsed = "—"
-        } else {
-            let ms = Int(date.timeIntervalSince(session.lastVolumeEvent) * 1000)
-            elapsed = "\(max(0, ms))"
-        }
-        return "vol \(elapsed) ms · \(session.volumeEventCount)"
-    }
-
-    private func volumeDebugLine(onDark: Bool = false) -> some View {
-        TimelineView(.periodic(from: .now, by: 0.1)) { timeline in
-            Text(volumeDebugText(at: timeline.date))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(onDark ? Color.white.opacity(0.55) : Color.secondary)
-        }
-    }
-    #endif
-
     private var darkOverlay: some View {
         ZStack {
             Color.black
@@ -332,12 +271,6 @@ struct ContentView: View {
                     .frame(width: 8, height: 8)
                     .accessibilityHidden(true)
             }
-            #if DEBUG
-            volumeDebugLine(onDark: true)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                .padding(.bottom, 28)
-                .allowsHitTesting(false)
-            #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
@@ -411,6 +344,115 @@ struct ContentView: View {
             get: { session.errorMessage != nil },
             set: { if !$0 { session.dismissError() } }
         )
+    }
+}
+
+private struct TalkGroupPill: View {
+    var title: String
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "dot.radiowaves.left.and.right")
+                Text(title)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.headline)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .glassEffect(.regular, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Åpner gruppene")
+    }
+}
+
+private struct JoinBanner: View {
+    let text: String
+
+    var body: some View {
+        if text.isEmpty {
+            EmptyView()
+        } else {
+            Label(text, systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.red)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .glassEffect(.regular.tint(.red), in: Capsule())
+        }
+    }
+}
+
+private struct CenterStatusLine: View {
+    var text: String
+    var symbol: String
+
+    var body: some View {
+        Label(text, systemImage: symbol)
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(.secondary)
+            .symbolRenderingMode(.hierarchical)
+    }
+}
+
+private struct TalkBottomBar: View {
+    var speakerOn: Bool
+    var onSpeaker: () -> Void
+    var onDark: () -> Void
+    var onGroups: () -> Void
+    var onDisconnect: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TalkIconButton(
+                systemImage: speakerIcon,
+                title: speakerTitle,
+                tint: speakerTint,
+                action: onSpeaker
+            )
+            TalkIconButton(systemImage: "moon.fill", title: "Mørk modus", tint: .primary, action: onDark)
+            TalkIconButton(systemImage: "person.3.fill", title: "Grupper", tint: .primary, action: onGroups)
+            TalkIconButton(systemImage: "phone.down.fill", title: "Koble fra", tint: .red, action: onDisconnect)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .glassEffect(.regular, in: Capsule())
+        .accessibilityElement(children: .contain)
+    }
+
+    private var speakerIcon: String {
+        speakerOn ? "speaker.wave.3.fill" : "speaker.slash.fill"
+    }
+
+    private var speakerTint: Color {
+        speakerOn ? .primary : .secondary
+    }
+
+    private var speakerTitle: String {
+        speakerOn ? "Høyttaler på" : "Høyttaler av"
+    }
+}
+
+private struct TalkIconButton: View {
+    var systemImage: String
+    var title: String
+    var tint: Color
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(width: 52, height: 44)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
     }
 }
 
@@ -517,6 +559,7 @@ private struct GroupRow: View {
                 .accessibilityLabel("Fjern \(group.name)")
             }
             Toggle("Lytt", isOn: listenBinding)
+            ProblemLine(text: session.joinProblem(for: group.id))
             MemberList(session: session, groupID: group.id)
             PresenceCaption(text: session.presenceCaption(for: group.id))
         }
@@ -557,6 +600,21 @@ private struct MemberList: View {
             ForEach(session.onlineMembers(in: groupID)) { member in
                 MemberLine(member: member)
             }
+        }
+    }
+}
+
+private struct ProblemLine: View {
+    let text: String
+
+    var body: some View {
+        if text.isEmpty {
+            EmptyView()
+        } else {
+            Label(text, systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.red)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

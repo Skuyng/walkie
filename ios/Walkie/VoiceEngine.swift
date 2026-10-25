@@ -23,9 +23,10 @@ enum VoiceEngineError: LocalizedError, Equatable {
 ///
 /// `playAndRecord` uses mode `.default`. `.voiceChat` applies heavy echo
 /// cancellation and automatic gain that quiet the loudspeaker, so it is not used.
-/// `allowBluetoothHFP` keeps a headset call route, and `allowBluetoothA2DP` is
-/// requested for higher-quality output. Høyttaler adds `defaultToSpeaker` and a
-/// speaker override; off uses the receiver unless a headset is connected.
+/// `allowBluetoothHFP` keeps a headset call route. A2DP is not requested:
+/// on a play-and-record session it pulls playback off the loudspeaker.
+/// Høyttaler adds `defaultToSpeaker` and a speaker override, applied again
+/// after the engine starts; off uses the receiver unless a headset is connected.
 /// Incoming PCM stays 16 kHz and is converted to the hardware rate. The input tap stays
 /// installed for the whole connection so iOS treats the app as an active audio
 /// app when the phone is locked. Samples are only sent upstream while the
@@ -62,7 +63,7 @@ final class VoiceEngine {
     private var primeBuffers: [AVAudioPCMBuffer] = []
     private var primeTimer: DispatchWorkItem?
     private var jitterTimerArmed = false
-    private var scheduledBuffers = 0
+    private var lastAudioAt = Date.distantPast
 
     private static let jitterSeconds = 0.14
     private static let jitterHold: TimeInterval = 0.15
@@ -209,15 +210,14 @@ final class VoiceEngine {
             self.jitterTimerArmed = false
             if !self.primeBuffers.isEmpty, let player = self.voicePlayer {
                 for buffer in self.primeBuffers {
-                    self.schedulePlayback(buffer, on: player)
+                    player.scheduleBuffer(buffer)
                 }
                 if !player.isPlaying { player.play() }
             }
             self.primeBuffers.removeAll()
             self.burstStarted = false
-            if self.scheduledBuffers == 0 {
-                self.decoder?.reset()
-            }
+            self.lastAudioAt = .distantPast
+            self.decoder?.reset()
         }
     }
 
@@ -261,6 +261,7 @@ final class VoiceEngine {
                     try self.buildAndStart()
                     self.shouldRun = true
                 }
+                applyOutputRoute(force: true)
                 log.info("Audio engine running mode=default")
                 return
             } catch VoiceEngineError.noInput where attempt == 1 {
@@ -353,7 +354,7 @@ final class VoiceEngine {
     }
 
     private func categoryOptions() -> AVAudioSession.CategoryOptions {
-        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP, .allowBluetoothA2DP]
+        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP]
         if useSpeaker {
             options.insert(.defaultToSpeaker)
         }
@@ -462,7 +463,7 @@ final class VoiceEngine {
         primeBuffers.removeAll()
         burstStarted = false
         jitterTimerArmed = false
-        scheduledBuffers = 0
+        lastAudioAt = .distantPast
     }
 
     private func handleInput(_ buffer: AVAudioPCMBuffer) {
@@ -535,8 +536,19 @@ final class VoiceEngine {
         guard let wire = Self.wireBuffer(fromPCM16: bytes), let playback = decoder.convert(wire) else { return }
         guard abs(playback.format.sampleRate - expected.sampleRate) < 1,
               playback.format.channelCount == expected.channelCount else { return }
+        let now = Date()
+        if now.timeIntervalSince(lastAudioAt) > 0.25 {
+            burstStarted = false
+            decoder.reset()
+            primeTimer?.cancel()
+            primeTimer = nil
+            jitterTimerArmed = false
+            primeBuffers.removeAll()
+        }
+        lastAudioAt = now
         if burstStarted {
-            schedulePlayback(playback, on: player)
+            player.scheduleBuffer(playback)
+            if !player.isPlaying { player.play() }
             return
         }
         primeBuffers.append(playback)
@@ -561,33 +573,10 @@ final class VoiceEngine {
         guard !primeBuffers.isEmpty, let player = voicePlayer else { return }
         burstStarted = true
         for buffer in primeBuffers {
-            schedulePlayback(buffer, on: player)
+            player.scheduleBuffer(buffer)
         }
         primeBuffers.removeAll()
         if !player.isPlaying { player.play() }
-    }
-
-    private func schedulePlayback(_ buffer: AVAudioPCMBuffer, on player: AVAudioPlayerNode) {
-        scheduledBuffers += 1
-        let completion: (AVAudioPlayerNodeCompletionCallbackType) -> Void = { [weak self] _ in
-            guard let self else { return }
-            let hop: () -> Void = {
-                self.notePlaybackFinished()
-            }
-            self.queue.async(execute: hop)
-        }
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack, completionHandler: completion)
-        if !player.isPlaying { player.play() }
-    }
-
-    private func notePlaybackFinished() {
-        scheduledBuffers = max(0, scheduledBuffers - 1)
-        let idle = scheduledBuffers == 0 && primeBuffers.isEmpty
-        if idle {
-            burstStarted = false
-            decoder?.reset()
-            jitterTimerArmed = false
-        }
     }
 
     private func playBeepOnQueue(frequency: Double) {
@@ -686,7 +675,6 @@ final class VoiceEngine {
         if session.category != .playAndRecord { return true }
         let options = session.categoryOptions
         if options.contains(.allowBluetoothHFP) == false { return true }
-        if options.contains(.allowBluetoothA2DP) == false { return true }
         return options.contains(.defaultToSpeaker) != useSpeaker
     }
 
