@@ -36,6 +36,9 @@ button:disabled{opacity:.45}
 <input id="gpass" type="password" placeholder="Gruppepassord (valgfritt)">
 <div class="row"><button id="create" type="button">Opprett gruppe</button><button id="ask" type="button">Be om å bli med</button></div>
 <div id="invites"></div>
+<div class="group"><h3>Direkte</h3>
+<div class="tools"><input id="directUser" placeholder="Brukernavn" autocapitalize="none"><button id="directAsk" type="button">Be om kontakt</button></div>
+<div id="directs"></div></div>
 <div id="groups"></div>
 <button id="go">Koble til</button>
 <button id="logout" type="button">Logg ut</button>
@@ -52,6 +55,7 @@ let groups=[];
 let invites=[];
 let requests=[];
 let blocked=[];
+let directs=[];
 let talk=localStorage.talk||'';
 let listenMap=loadListen();
 let members={};
@@ -102,14 +106,17 @@ function drawGroup(g){
   }).join('');
   const people=online?(problem+(rows||(problem?'':'<div class="person">Ingen pålogget</div>'))):problem;
   const mic=g.id===talk?'Snakk':'Velg';
-  const title=escapeHtml(g.name)+(g.locked?' 🔒':'')+(g.admin?' · admin':'');
+  const others=peopleFor(g).filter(person=>myId?person.id!==myId:person.name!==myName);
+  const live=!!(online&&g.direct&&others.length);
+  const dot=g.direct?'<span class="dot" style="background:'+(live?'#3d3':'#555')+'"></span> ':'';
+  const title=dot+escapeHtml(g.name)+(g.locked?' 🔒':'')+(g.admin&&!g.direct?' · admin':'');
   let admin='';
-  if(g.admin){
+  if(g.admin&&!g.direct){
     const reqs=(requests||[]).filter(item=>item.room===g.id).map(item=>'<div class="tools"><span>'+escapeHtml(item.displayName||item.username)+'</span><button data-act="yesreq" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(item.username)+'">Godta</button><button data-act="noreq" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(item.username)+'">Avslå</button></div>').join('');
     const clearPass=g.locked?'<button data-act="clearpass" data-id="'+escapeHtml(g.id)+'">Fjern passord</button>':'';
     admin='<div class="tools"><input data-pass="'+escapeHtml(g.id)+'" type="password" placeholder="Nytt passord"><button data-act="setpass" data-id="'+escapeHtml(g.id)+'">Lagre passord</button>'+clearPass+'</div><div class="tools"><input data-invite="'+escapeHtml(g.id)+'" placeholder="Brukernavn"><button data-act="invite" data-id="'+escapeHtml(g.id)+'">Invitér</button></div>'+reqs;
   }
-  const roster=(g.roster||[]).map(member=>{
+  const roster=g.direct?'':(g.roster||[]).map(member=>{
     const line=escapeHtml((member.name||member.username)+' (@'+member.username+')');
     if(member.username===username)return '<div class="person">'+line+'</div>';
     const blockedNow=blocked.indexOf(member.username)>=0;
@@ -118,15 +125,27 @@ function drawGroup(g){
     const remove=g.admin&&member.role!=='admin'?'<button data-act="kick" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(member.username)+'">Fjern</button>':'';
     return '<div class="person">'+line+'<button data-act="'+blockAct+'" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(member.username)+'">'+blockLabel+'</button><button data-act="report" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(member.username)+'">Rapporter</button>'+remove+'</div>';
   }).join('');
-  const drop=g.admin?'Slett':'Forlat';
-  return '<div class="group"><h3>'+title+'</h3><div class="tools"><button data-act="talk" data-id="'+escapeHtml(g.id)+'">'+mic+'</button><label class="chk"><input data-act="listen" data-id="'+escapeHtml(g.id)+'" type="checkbox"'+(g.listen?' checked':'')+'> Lytt</label><button data-act="drop" data-id="'+escapeHtml(g.id)+'">'+drop+'</button></div>'+admin+roster+people+'</div>';
+  const drop=g.direct?'Avslutt':(g.admin?'Slett':'Forlat');
+  const dropAct=g.direct?'dstop':'drop';
+  return '<div class="group"><h3>'+title+'</h3><div class="tools"><button data-act="talk" data-id="'+escapeHtml(g.id)+'">'+mic+'</button><label class="chk"><input data-act="listen" data-id="'+escapeHtml(g.id)+'" type="checkbox"'+(g.listen?' checked':'')+'> Lytt</label><button data-act="'+dropAct+'" data-id="'+escapeHtml(g.id)+'">'+drop+'</button></div>'+(g.direct&&g.peer?'<div class="tools"><button data-act="'+(blocked.indexOf(g.peer)>=0?'unblock':'block')+'" data-user="'+escapeHtml(g.peer)+'">'+(blocked.indexOf(g.peer)>=0?'Opphev blokkering':'Blokker')+'</button><button data-act="report" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(g.peer)+'">Rapporter</button></div>':'')+admin+roster+people+'</div>';
 }
 function drawInvites(){
   $('invites').innerHTML=invites.map(invite=>'<div class="group"><h3>'+escapeHtml(invite.name)+'</h3><div class="hint">Fra '+escapeHtml(invite.fromName||invite.from||'')+'</div><div class="tools"><button data-act="yesinv" data-id="'+escapeHtml(invite.room)+'">Godta</button><button data-act="noinv" data-id="'+escapeHtml(invite.room)+'">Avslå</button></div></div>').join('');
 }
+function drawDirects(){
+  const requests=directs.map(item=>{
+    const person=escapeHtml((item.name||item.username)+' (@'+item.username+')');
+    if(item.incoming)return '<div class="person">'+person+' vil snakke direkte <button data-act="dyes" data-user="'+escapeHtml(item.username)+'">Godta</button><button data-act="dno" data-user="'+escapeHtml(item.username)+'">Avslå</button></div>';
+    return '<div class="person">Venter på '+person+' <button data-act="dno" data-user="'+escapeHtml(item.username)+'">Avbryt</button></div>';
+  }).join('');
+  const cards=groups.filter(g=>g.direct).map(drawGroup).join('');
+  $('directs').innerHTML=requests+cards;
+}
 function render(){
   drawInvites();
-  const html=groups.map(drawGroup).join('')||'<p class="hint">Ingen grupper ennå.</p>';
+  drawDirects();
+  const rest=groups.filter(g=>!g.direct);
+  const html=rest.map(drawGroup).join('')||'<p class="hint">Ingen grupper ennå.</p>';
   $('groups').innerHTML=html;
   if($('liveGroups'))$('liveGroups').innerHTML=groups.map(drawGroup).join('');
   document.querySelectorAll('[data-act]').forEach(el=>el.onclick=onTool);
@@ -149,6 +168,8 @@ function onTool(e){
   if(act==='yesinv'||act==='noinv')send({t:'inviteReply',room:id,accept:act==='yesinv'});
   if(act==='yesreq'||act==='noreq')send({t:'requestReply',room:id,username:user,accept:act==='yesreq'});
   if(act==='kick'){if(confirm('Fjerne @'+user+' fra gruppen?'))send({t:'removeMember',room:id,username:user})}
+  if(act==='dstop'){if(confirm('Avslutte direkte? Kanalen slettes for begge.'))send({t:'removeDirect',room:id})}
+  if(act==='dyes'||act==='dno')send({t:'directReply',username:user,accept:act==='dyes'});
   if(act==='block')send({t:'block',username:user});
   if(act==='unblock')send({t:'unblock',username:user});
   if(act==='report'){if(confirm('Rapportere @'+user+'? Rapporten lagres hos serveren. Misbruk tåles ikke.'))send({t:'report',username:user,room:id,reason:'Uakseptabel oppførsel'})}
@@ -166,11 +187,12 @@ function applyInbox(message){
   groups=(message.groups||[]).map(item=>{
     const old=previous.find(g=>g.id===item.id);
     const listen=old?!!old.listen:listenMap[item.id]!==false;
-    return {id:item.id,name:item.name||item.id,admin:!!item.admin,locked:!!item.locked,listen,roster:item.members||[]};
+    return {id:item.id,name:item.name||item.id,admin:!!item.admin,locked:!!item.locked,direct:!!item.direct,peer:item.peer||'',listen,roster:item.members||[]};
   });
   invites=message.invites||[];
   requests=message.requests||[];
   blocked=message.blocked||[];
+  directs=message.directs||[];
   if(prefer&&groups.some(g=>g.id===prefer))talk=prefer;
   prefer='';
   if(!groups.some(g=>g.id===talk))talk=groups[0]?groups[0].id:'';
@@ -198,7 +220,7 @@ function onMessage(e){
   if(m.t==='deleted'){
     talking=false;
     if($('ptt')){$('ptt').classList.remove('on');$('ptt').textContent='Hold for å snakke'}
-    clearTimeout(reconnectTimer);tok='';username='';authed=false;groups=[];invites=[];requests=[];talk='';blocked=[];
+    clearTimeout(reconnectTimer);tok='';username='';authed=false;groups=[];invites=[];requests=[];talk='';blocked=[];directs=[];
     localStorage.removeItem('tok');
     pending=null;
     if(ws){ws.onclose=null;ws.close();ws=null}
@@ -210,7 +232,7 @@ function onMessage(e){
   if(m.t==='error'){
     const room=m.room||'';
     const text=m.error||'Noe gikk galt';
-    if(String(text).indexOf('fjernet')>=0){talking=false;$('ptt').classList.remove('on');$('ptt').textContent='Hold for å snakke'}
+    if(String(text).indexOf('fjernet')>=0||String(text).indexOf('avsluttet')>=0){talking=false;$('ptt').classList.remove('on');$('ptt').textContent='Hold for å snakke'}
     if(!authed){
       if(text==='Logg inn')localStorage.removeItem('tok');
       tok=localStorage.tok||'';
@@ -308,7 +330,7 @@ $('ask').onclick=()=>{
 };
 function logout(){
   send({t:'logout'});
-  clearTimeout(reconnectTimer);tok='';username='';authed=false;groups=[];invites=[];requests=[];talk='';blocked=[];
+  clearTimeout(reconnectTimer);tok='';username='';authed=false;groups=[];invites=[];requests=[];talk='';blocked=[];directs=[];
   localStorage.removeItem('tok');
   pending=null;
   if(ws){ws.onclose=null;ws.close();ws=null}
@@ -316,13 +338,19 @@ function logout(){
   show('account');
   setStatus('');
 }
+$('directAsk').onclick=()=>{
+  const who=userId($('directUser').value);
+  if(!validUser(who))return alert('Skriv et brukernavn.');
+  send({t:'direct',username:who});
+  $('directUser').value='';
+};
 $('logout').onclick=logout;
 $('delete').onclick=()=>{
   if(!confirm('Slette kontoen? Brukeren, øktene og medlemskapene slettes. Grupper du eier alene slettes. Ellers får det eldste medlemmet admin. Dette kan ikke angres.'))return;
   send({t:'deleteAccount'});
 };
 $('go').onclick=async()=>{
-  if(!groups.length)return alert('Opprett eller bli med i en gruppe.');
+  if(!groups.length)return alert('Opprett en gruppe, eller start en direkte samtale.');
   ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();
   await ctx.resume();
   try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}})}catch(e){return alert('Fikk ikke tilgang til mikrofonen. Tillat mikrofon i Safari.')}

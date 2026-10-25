@@ -32,6 +32,7 @@ final class WalkieSession: ObservableObject {
     @Published private(set) var invites: [WalkieInvite] = []
     @Published private(set) var requests: [WalkieRequest] = []
     @Published private(set) var blockedUsernames: [String] = []
+    @Published private(set) var directRequests: [DirectRequest] = []
 
     var canTransmit: Bool {
         linkState == .connected && audioReady
@@ -267,6 +268,7 @@ final class WalkieSession: ObservableObject {
         invites = []
         requests = []
         blockedUsernames = []
+        directRequests = []
         talkGroup = ""
         room = ""
         preferTalk = nil
@@ -449,9 +451,45 @@ final class WalkieSession: ObservableObject {
         pushSubscribe()
     }
 
+    @discardableResult
+    func requestDirect(username rawUser: String) -> Bool {
+        let user = Self.normalizeUsername(rawUser)
+        guard Self.validUsername(user) else {
+            suggestsSettings = false
+            errorMessage = "Skriv et brukernavn."
+            return false
+        }
+        guard user != accountUsername else {
+            suggestsSettings = false
+            errorMessage = "Du kan ikke kontakte deg selv."
+            return false
+        }
+        guard signedIn, socketOpen else {
+            suggestsSettings = false
+            errorMessage = "Logg inn"
+            return false
+        }
+        socket.sendDirect(username: user)
+        return true
+    }
+
+    func replyDirect(username: String, accept: Bool) {
+        socket.sendDirectReply(username: username, accept: accept)
+    }
+
+    func peerIsOnline(in groupID: String) -> Bool {
+        let people = membersByRoom[groupID] ?? []
+        if selfID.isEmpty {
+            return people.contains { $0.name != name }
+        }
+        return people.contains { $0.id != selfID }
+    }
+
     func removeGroup(_ id: String) {
         guard let group = groups.first(where: { $0.id == id }) else { return }
-        if group.admin {
+        if group.direct {
+            socket.sendRemoveDirect(room: id)
+        } else if group.admin {
             socket.sendDeleteGroup(room: id)
         } else {
             socket.sendLeave(room: id)
@@ -464,6 +502,7 @@ final class WalkieSession: ObservableObject {
             removeTalker(id: talker.id, room: talker.room)
         }
         if talkGroup == id {
+            if isTalking { endTransmitting() }
             talkGroup = groups.first?.id ?? ""
             syncRoomName()
         }
@@ -504,7 +543,7 @@ final class WalkieSession: ObservableObject {
         guard linkState == .signedIn || linkState == .disconnected else { return }
         guard !groups.isEmpty else {
             suggestsSettings = false
-            errorMessage = "Opprett eller bli med i en gruppe."
+            errorMessage = "Opprett en gruppe, eller start en direkte samtale."
             return
         }
         if !groups.contains(where: { $0.id == talkGroup }) {
@@ -756,8 +795,9 @@ final class WalkieSession: ObservableObject {
                 statusText = "Innlogget"
             }
             savePreferences()
-        case .inbox(let serverGroups, let nextInvites, let nextRequests, let blocked):
+        case .inbox(let serverGroups, let nextInvites, let nextRequests, let blocked, let directs):
             blockedUsernames = blocked
+            directRequests = directs
             applyInbox(serverGroups, invites: nextInvites, requests: nextRequests)
         case .reported:
             suggestsSettings = false
@@ -801,6 +841,7 @@ final class WalkieSession: ObservableObject {
                 groups = []
                 invites = []
                 requests = []
+                directRequests = []
                 audioReady = false
                 hasConnectedOnce = false
                 engine.stop()
@@ -815,7 +856,7 @@ final class WalkieSession: ObservableObject {
                 prepareVolumeHUD()
                 return
             }
-            if text == "Du er fjernet fra gruppen" {
+            if text == "Du er fjernet fra gruppen" || text == "Direktekanalen er avsluttet" {
                 endTransmitting()
             }
             if !room.isEmpty {
@@ -872,7 +913,9 @@ final class WalkieSession: ObservableObject {
                     listen: listen,
                     locked: item.locked,
                     admin: item.admin,
-                    roster: item.members
+                    roster: item.members,
+                    direct: item.direct,
+                    peer: item.peer
                 )
             )
         }
@@ -1070,10 +1113,12 @@ struct ServerGroup: Decodable, Equatable {
     var name: String
     var admin: Bool
     var locked: Bool
+    var direct: Bool
+    var peer: String
     var members: [AccountMember]
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, admin, locked, members
+        case id, name, admin, locked, direct, peer, members
     }
 
     init(from decoder: Decoder) throws {
@@ -1082,7 +1127,27 @@ struct ServerGroup: Decodable, Equatable {
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
         admin = try container.decodeIfPresent(Bool.self, forKey: .admin) ?? false
         locked = try container.decodeIfPresent(Bool.self, forKey: .locked) ?? false
+        direct = try container.decodeIfPresent(Bool.self, forKey: .direct) ?? false
+        peer = try container.decodeIfPresent(String.self, forKey: .peer) ?? ""
         members = try container.decodeIfPresent([AccountMember].self, forKey: .members) ?? []
+    }
+}
+
+struct DirectRequest: Decodable, Identifiable, Equatable {
+    var username: String
+    var name: String
+    var incoming: Bool
+    var id: String { username + (incoming ? "/in" : "/out") }
+
+    private enum CodingKeys: String, CodingKey {
+        case username, name, incoming
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        username = try container.decode(String.self, forKey: .username)
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        incoming = try container.decodeIfPresent(Bool.self, forKey: .incoming) ?? false
     }
 }
 
@@ -1134,9 +1199,11 @@ struct WalkieGroup: Codable, Identifiable, Equatable {
     var setsPassword: Bool
     var admin: Bool
     var roster: [AccountMember]
+    var direct: Bool
+    var peer: String
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, listen, locked, setsPassword, admin, roster
+        case id, name, listen, locked, setsPassword, admin, roster, direct, peer
     }
 
     init(
@@ -1146,7 +1213,9 @@ struct WalkieGroup: Codable, Identifiable, Equatable {
         locked: Bool = false,
         setsPassword: Bool = false,
         admin: Bool = false,
-        roster: [AccountMember] = []
+        roster: [AccountMember] = [],
+        direct: Bool = false,
+        peer: String = ""
     ) {
         self.id = id
         self.name = name
@@ -1155,6 +1224,8 @@ struct WalkieGroup: Codable, Identifiable, Equatable {
         self.setsPassword = setsPassword
         self.admin = admin
         self.roster = roster
+        self.direct = direct
+        self.peer = peer
     }
 
     init(from decoder: Decoder) throws {
@@ -1166,6 +1237,8 @@ struct WalkieGroup: Codable, Identifiable, Equatable {
         setsPassword = try container.decodeIfPresent(Bool.self, forKey: .setsPassword) ?? false
         admin = try container.decodeIfPresent(Bool.self, forKey: .admin) ?? false
         roster = try container.decodeIfPresent([AccountMember].self, forKey: .roster) ?? []
+        direct = try container.decodeIfPresent(Bool.self, forKey: .direct) ?? false
+        peer = try container.decodeIfPresent(String.self, forKey: .peer) ?? ""
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1177,6 +1250,8 @@ struct WalkieGroup: Codable, Identifiable, Equatable {
         try container.encode(setsPassword, forKey: .setsPassword)
         try container.encode(admin, forKey: .admin)
         try container.encode(roster, forKey: .roster)
+        try container.encode(direct, forKey: .direct)
+        try container.encode(peer, forKey: .peer)
     }
 }
 

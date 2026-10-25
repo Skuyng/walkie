@@ -4,7 +4,7 @@ import os
 /// Events from the walkie server. Binary audio is delivered separately.
 enum ServerEvent {
     case session(token: String, username: String, name: String)
-    case inbox(groups: [ServerGroup], invites: [WalkieInvite], requests: [WalkieRequest], blocked: [String])
+    case inbox(groups: [ServerGroup], invites: [WalkieInvite], requests: [WalkieRequest], blocked: [String], directs: [DirectRequest])
     case reported
     case accountDeleted
     case users(room: String, members: [RoomMember], selfID: String)
@@ -140,6 +140,18 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
 
     func sendReport(username: String, room: String, reason: String) {
         sendEncodable(Command(t: "report", username: username, room: room, reason: reason))
+    }
+
+    func sendDirect(username: String) {
+        sendEncodable(Command(t: "direct", username: username))
+    }
+
+    func sendDirectReply(username: String, accept: Bool) {
+        sendEncodable(Command(t: "directReply", username: username, accept: accept))
+    }
+
+    func sendRemoveDirect(room: String) {
+        sendEncodable(Command(t: "removeDirect", room: room))
     }
 
     func sendSubscribe(talk: String, muted: [String]) {
@@ -294,7 +306,8 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
                 groups: message.groups ?? [],
                 invites: message.invites ?? [],
                 requests: message.requests ?? [],
-                blocked: message.blocked ?? []
+                blocked: message.blocked ?? [],
+                directs: message.directs ?? []
             )
         case "reported":
             return .reported
@@ -391,9 +404,10 @@ private struct Inbound: Decodable {
     var invites: [WalkieInvite]?
     var requests: [WalkieRequest]?
     var blocked: [String]?
+    var directs: [DirectRequest]?
 
     enum CodingKeys: String, CodingKey {
-        case t, name, users, members, room, error, id, token, username, groups, invites, requests, blocked
+        case t, name, users, members, room, error, id, token, username, groups, invites, requests, blocked, directs
         case me = "self"
     }
 }

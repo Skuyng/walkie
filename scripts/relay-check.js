@@ -296,6 +296,95 @@ async function startServer() {
     } catch { return false; }
   }, 4000, jobAt);
 
+  const selfDirect = ada.inbox.length;
+  send(ada, { t: 'direct', username: 'ada' });
+  const selfDenied = jsonText(await waitFor(ada.inbox, (entry) => !entry.bin && entry.text.includes('deg selv'), 4000, selfDirect));
+  if (!String(selfDenied.error || '').includes('deg selv')) throw new Error('self direct was accepted');
+
+  const askBob = bob.inbox.length;
+  send(ada, { t: 'direct', username: 'bob' });
+  const bobAsked = jsonText(await waitFor(bob.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.directs || []).some((item) => item.username === 'ada' && item.incoming === true);
+    } catch { return false; }
+  }, 4000, askBob));
+  if (!bobAsked.directs.some((item) => item.username === 'ada' && item.incoming)) throw new Error('direct request missing');
+  const declineAt = ada.inbox.length;
+  send(bob, { t: 'directReply', username: 'ada', accept: false });
+  await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && !(message.directs || []).some((item) => item.username === 'bob');
+    } catch { return false; }
+  }, 4000, declineAt);
+
+  const askCara = cara.inbox.length;
+  send(ada, { t: 'direct', username: 'cara' });
+  await waitFor(cara.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.directs || []).some((item) => item.username === 'ada' && item.incoming === true);
+    } catch { return false; }
+  }, 4000, askCara);
+  const acceptAt = ada.inbox.length;
+  send(cara, { t: 'directReply', username: 'ada', accept: true });
+  const adaDirect = jsonText(await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.direct === true && group.peer === 'cara' && group.name === 'Cara');
+    } catch { return false; }
+  }, 4000, acceptAt));
+  const dm = adaDirect.groups.find((group) => group.direct && group.peer === 'cara');
+  if (!dm) throw new Error('direct channel missing for ada');
+  const caraDirect = jsonText(await waitFor(cara.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.id === dm.id && group.direct === true && group.peer === 'ada' && group.name === 'Sku');
+    } catch { return false; }
+  }, 4000, askCara));
+  if (!caraDirect.groups.some((group) => group.id === dm.id && group.peer === 'ada')) throw new Error('direct channel missing for cara');
+  send(ada, { t: 'subscribe', talk: dm.id, muted: [] });
+  send(cara, { t: 'subscribe', talk: dm.id, muted: [] });
+  const dmHear = cara.inbox.length;
+  ada.ws.send(frame);
+  const dmAudio = await waitFor(cara.inbox, (entry) => entry.bin, 3000, dmHear);
+  if (!dmAudio.data.equals(frame)) throw new Error('direct audio missed');
+  const blockDm = ada.inbox.length;
+  send(ada, { t: 'block', username: 'cara' });
+  await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && Array.isArray(message.blocked) && message.blocked.includes('cara');
+    } catch { return false; }
+  }, 4000, blockDm);
+  const adaSilent = ada.inbox.length;
+  const caraSilent = cara.inbox.length;
+  cara.ws.send(frame);
+  ada.ws.send(frame);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (ada.inbox.slice(adaSilent).some((entry) => entry.bin)) throw new Error('blocked direct audio was played');
+  if (cara.inbox.slice(caraSilent).some((entry) => entry.bin)) throw new Error('direct audio reached a blocked person');
+  const openDm = ada.inbox.length;
+  send(ada, { t: 'unblock', username: 'cara' });
+  await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && Array.isArray(message.blocked) && !message.blocked.includes('cara');
+    } catch { return false; }
+  }, 4000, openDm);
+  const againDm = cara.inbox.length;
+  ada.ws.send(frame);
+  const dmBack = await waitFor(cara.inbox, (entry) => entry.bin, 3000, againDm);
+  if (!dmBack.data.equals(frame)) throw new Error('direct audio did not return after unblock');
+
   const token = adaSession.token;
   ada.ws.close();
   bob.ws.close();
@@ -310,19 +399,77 @@ async function startServer() {
   const still = jsonText(await waitFor(again.inbox, (entry) => !entry.bin && entry.text.includes('"inbox"')));
   if (!still.groups.some((group) => group.id === 'familie' && group.admin)) throw new Error('group missing after restart');
   if (!still.groups.some((group) => group.id === 'jobb' && group.locked === true)) throw new Error('password missing after restart');
+  const kept = still.groups.find((group) => group.direct === true && group.peer === 'cara' && group.name === 'Cara');
+  if (!kept) throw new Error('direct channel missing after restart');
 
   const bobAgain = await connect(server.url);
   send(bobAgain, { t: 'login', username: 'bob', password: 'secret2' });
   await waitFor(bobAgain.inbox, (entry) => !entry.bin && entry.text.includes('"session"'));
   const caraAgain = await connect(server.url);
   send(caraAgain, { t: 'login', username: 'cara', password: 'secret3' });
-  await waitFor(caraAgain.inbox, (entry) => !entry.bin && entry.text.includes('"session"'));
+  await waitFor(caraAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.id === kept.id);
+    } catch { return false; }
+  });
   const beforeDelete = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
   const adaId = (beforeDelete.users.find((user) => user.username === 'ada') || {}).id;
   const caraId = (beforeDelete.users.find((user) => user.username === 'cara') || {}).id;
   const familieMembers = beforeDelete.members.filter((member) => member.groupId === 'familie' && member.userId !== adaId);
   familieMembers.sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0) || String(a.userId).localeCompare(String(b.userId)));
   if (!familieMembers.length || familieMembers[0].userId !== caraId) throw new Error('expected cara to be the oldest other member');
+  const dmId = kept.id;
+  const endAt = caraAgain.inbox.length;
+  send(again, { t: 'removeDirect', room: dmId });
+  const ended = jsonText(await waitFor(caraAgain.inbox, (entry) => !entry.bin && entry.text.includes('avsluttet'), 4000, endAt));
+  if (!String(ended.error || '').includes('avsluttet')) throw new Error('direct end was not announced');
+  await waitFor(caraAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && !(message.groups || []).some((group) => group.id === dmId);
+    } catch { return false; }
+  }, 4000, endAt);
+  const blockedAsk = again.inbox.length;
+  send(caraAgain, { t: 'block', username: 'ada' });
+  await waitFor(caraAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && Array.isArray(message.blocked) && message.blocked.includes('ada');
+    } catch { return false; }
+  }, 4000, endAt);
+  send(again, { t: 'direct', username: 'cara' });
+  const blockedDirect = jsonText(await waitFor(again.inbox, (entry) => !entry.bin && entry.text.includes('kan ikke kontakte'), 4000, blockedAsk));
+  if (!String(blockedDirect.error || '').includes('kan ikke kontakte')) throw new Error('blocked direct request was accepted');
+  const clearBlock = caraAgain.inbox.length;
+  send(caraAgain, { t: 'unblock', username: 'ada' });
+  await waitFor(caraAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && Array.isArray(message.blocked) && !message.blocked.includes('ada');
+    } catch { return false; }
+  }, 4000, clearBlock);
+  const reask = caraAgain.inbox.length;
+  send(again, { t: 'direct', username: 'cara' });
+  await waitFor(caraAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.directs || []).some((item) => item.username === 'ada' && item.incoming === true);
+    } catch { return false; }
+  }, 4000, reask);
+  send(caraAgain, { t: 'directReply', username: 'ada', accept: true });
+  await waitFor(caraAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.direct === true && group.peer === 'ada');
+    } catch { return false; }
+  }, 4000, reask);
   const deleteAt = again.inbox.length;
   const caraDeleteAt = caraAgain.inbox.length;
   send(again, { t: 'deleteAccount' });
@@ -333,7 +480,7 @@ async function startServer() {
     try {
       const message = JSON.parse(entry.text);
       const familie = (message.groups || []).find((group) => group.id === 'familie');
-      return message.t === 'inbox' && familie && familie.admin === true && !(message.groups || []).some((group) => group.id === 'jobb');
+      return message.t === 'inbox' && familie && familie.admin === true && !(message.groups || []).some((group) => group.id === 'jobb') && !(message.groups || []).some((group) => group.direct && group.peer === 'ada');
     } catch { return false; }
   }, 4000, caraDeleteAt);
   const saved = JSON.parse(fs.readFileSync(storeFile, 'utf8'));

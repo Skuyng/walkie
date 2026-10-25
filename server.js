@@ -76,12 +76,17 @@ function authed(client, room) {
   return !!(client.auth && client.auth.has(room));
 }
 
+function isDirectRoom(room) {
+  return /^dm[0-9a-f]{32}$/.test(room);
+}
+
 function bc(room, data, except, bin) {
   for (const client of wss.clients) {
     if (client === except || client.readyState !== 1) continue;
     if (bin) {
       if (!listening(client, room) || !authed(client, room)) continue;
       if (except && except.user && client.blocked && client.blocked.has(except.user.id)) continue;
+      if (isDirectRoom(room) && except && except.user && client.user && except.blocked && except.blocked.has(client.user.id)) continue;
     } else if (!authed(client, room)) {
       continue;
     }
@@ -135,7 +140,8 @@ async function sendInbox(ws) {
   const invites = await store.invitesFor(ws.user.id);
   const requests = await store.requestsForAdmin(ws.user.id);
   const blocked = await store.blockedUsernames(ws.user.id);
-  send(ws, { t: 'inbox', groups, invites, requests, blocked });
+  const directs = await store.directRequestsFor(ws.user.id);
+  send(ws, { t: 'inbox', groups, invites, requests, blocked, directs });
   return groups;
 }
 
@@ -315,6 +321,47 @@ async function logout(ws) {
   ws.talk = '';
   ws.room = '';
   for (const room of previous) sendUsers(room);
+}
+
+async function directRequest(ws, message) {
+  if (!requireUser(ws)) return;
+  const username = normUser(message.username);
+  if (!validUser(username)) {
+    sendError(ws, '', 'Skriv et brukernavn.');
+    return;
+  }
+  await store.directRequest(ws.user.id, username);
+  await syncAll([]);
+}
+
+async function directReply(ws, message) {
+  if (!requireUser(ws)) return;
+  const username = normUser(message.username);
+  if (!validUser(username)) {
+    sendError(ws, '', 'Skriv et brukernavn.');
+    return;
+  }
+  const room = await store.directReply(ws.user.id, username, !!message.accept);
+  await syncAll(room ? [room] : []);
+}
+
+async function removeDirect(ws, message) {
+  if (!requireUser(ws)) return;
+  const room = normRoom(message.room);
+  if (!isDirectRoom(room)) {
+    sendError(ws, room, 'Fant ikke kanalen');
+    return;
+  }
+  await store.removeDirect(ws.user.id, room);
+  for (const client of wss.clients) {
+    if (client.readyState !== 1 || client === ws || !client.auth || !client.auth.has(room)) continue;
+    const name = client.name;
+    const id = client.peerId;
+    if (name) bc(room, JSON.stringify({ t: 'stop', name, room, id }), null, false);
+    dropRoom(client, room);
+    sendError(client, room, 'Direktekanalen er avsluttet');
+  }
+  await syncAll([room]);
 }
 
 async function createGroup(ws, message) {
@@ -512,6 +559,9 @@ async function handleMessage(ws, message) {
   if (message.t === 'block') return blockUser(ws, message);
   if (message.t === 'unblock') return unblockUser(ws, message);
   if (message.t === 'report') return reportUser(ws, message);
+  if (message.t === 'direct') return directRequest(ws, message);
+  if (message.t === 'directReply') return directReply(ws, message);
+  if (message.t === 'removeDirect') return removeDirect(ws, message);
   if (message.t === 'createGroup') return createGroup(ws, message);
   if (message.t === 'invite') return invite(ws, message);
   if (message.t === 'inviteReply') return inviteReply(ws, message);

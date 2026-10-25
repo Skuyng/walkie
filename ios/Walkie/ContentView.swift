@@ -627,6 +627,7 @@ private struct GroupEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            DirectSection(session: session)
             InviteSection(session: session)
             Text("Gruppe")
                 .font(.subheadline.weight(.semibold))
@@ -730,12 +731,89 @@ private struct InviteRow: View {
     }
 }
 
+private struct DirectSection: View {
+    @ObservedObject var session: WalkieSession
+    @State private var username = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Direkte")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                TextField("Brukernavn", text: $username)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.send)
+                    .onSubmit(send)
+                    .glassFieldChrome()
+                Button("Be om kontakt", action: send)
+                    .buttonStyle(.glass)
+            }
+            ForEach(session.directRequests) { request in
+                DirectRequestRow(session: session, request: request)
+            }
+            ForEach(session.groups.filter(\.direct)) { group in
+                GroupRow(session: session, group: group)
+            }
+        }
+    }
+
+    private func send() {
+        let saved = session.requestDirect(username: username)
+        if saved { username = "" }
+    }
+}
+
+private struct DirectRequestRow: View {
+    @ObservedObject var session: WalkieSession
+    let request: DirectRequest
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(headline)
+                .font(.headline)
+            Text(detail)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                if request.incoming {
+                    Button("Godta") { session.replyDirect(username: request.username, accept: true) }
+                        .buttonStyle(.glassProminent)
+                        .tint(.red)
+                    Button("Avslå") { session.replyDirect(username: request.username, accept: false) }
+                        .buttonStyle(.glass)
+                } else {
+                    Button("Avbryt") { session.replyDirect(username: request.username, accept: false) }
+                        .buttonStyle(.glass)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var person: String {
+        if request.name.isEmpty { return "@\(request.username)" }
+        return "\(request.name) (@\(request.username))"
+    }
+
+    private var headline: String {
+        request.incoming ? person : "Venter på \(person)"
+    }
+
+    private var detail: String {
+        request.incoming ? "Vil snakke direkte" : "Forespørselen er sendt"
+    }
+}
+
 private struct GroupList: View {
     @ObservedObject var session: WalkieSession
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(session.groups) { group in
+            ForEach(session.groups.filter { !$0.direct }) { group in
                 GroupRow(session: session, group: group)
             }
         }
@@ -745,10 +823,18 @@ private struct GroupList: View {
 private struct GroupRow: View {
     @ObservedObject var session: WalkieSession
     let group: WalkieGroup
+    @State private var confirmDirect = false
+    @State private var confirmReport = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
+                if group.direct {
+                    Circle()
+                        .fill(session.peerIsOnline(in: group.id) ? Color.green : Color.secondary.opacity(0.35))
+                        .frame(width: 8, height: 8)
+                        .accessibilityLabel(onlineLabel)
+                }
                 Text(group.name)
                     .font(.headline)
                 if group.locked {
@@ -764,23 +850,65 @@ private struct GroupRow: View {
                 Spacer(minLength: 8)
                 Button(talkTitle, action: select)
                     .buttonStyle(.glass)
-                Button(role: .destructive, action: remove) {
+                Button(role: .destructive, action: removeTapped) {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.glass)
                 .accessibilityLabel("Fjern \(group.name)")
             }
             Toggle("Lytt", isOn: listenBinding)
-            if group.admin {
+            if group.direct && !group.peer.isEmpty {
+                HStack(spacing: 8) {
+                    Button(blockTitle) { session.setBlocked(group.peer, !session.isBlocked(group.peer)) }
+                        .buttonStyle(.glass)
+                    Button("Rapporter") { confirmReport = true }
+                        .buttonStyle(.glass)
+                }
+            }
+            if group.admin && !group.direct {
                 AdminTools(session: session, group: group)
             }
-            RosterList(session: session, group: group)
+            if !group.direct {
+                RosterList(session: session, group: group)
+            }
             ProblemLine(text: session.joinProblem(for: group.id))
             MemberList(session: session, groupID: group.id)
             PresenceCaption(text: session.presenceCaption(for: group.id))
         }
         .padding(12)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .confirmationDialog(directTitle, isPresented: $confirmDirect, titleVisibility: .visible) {
+            Button("Avslutt", role: .destructive, action: remove)
+            Button("Avbryt", role: .cancel) {}
+        } message: {
+            Text("Kanalen slettes for begge.")
+        }
+        .alert(reportTitle, isPresented: $confirmReport) {
+            Button("Send", action: reportPeer)
+            Button("Avbryt", role: .cancel) {}
+        } message: {
+            Text("Rapporten lagres hos serveren. Misbruk tåles ikke.")
+        }
+    }
+
+    private var blockTitle: String {
+        session.isBlocked(group.peer) ? "Opphev blokkering" : "Blokker"
+    }
+
+    private var reportTitle: String {
+        "Rapportere \(group.name)?"
+    }
+
+    private func reportPeer() {
+        session.report(username: group.peer, room: group.id)
+    }
+
+    private var onlineLabel: String {
+        session.peerIsOnline(in: group.id) ? "Pålogget" : "Ikke pålogget"
+    }
+
+    private var directTitle: String {
+        "Avslutte direkte med \(group.name)?"
     }
 
     private var talkTitle: String {
@@ -796,6 +924,14 @@ private struct GroupRow: View {
 
     private func select() {
         session.selectTalk(group.id)
+    }
+
+    private func removeTapped() {
+        if group.direct {
+            confirmDirect = true
+        } else {
+            remove()
+        }
     }
 
     private func remove() {
