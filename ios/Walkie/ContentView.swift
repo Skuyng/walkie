@@ -11,10 +11,10 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             AuroraBackground(live: auroraLive)
-            if !session.signedIn {
-                AccountGate(session: session)
-            } else {
+            if session.signedIn || session.restoringSession {
                 talkScreen
+            } else {
+                LoginWindow(session: session)
             }
             if darkMode {
                 darkOverlay
@@ -46,6 +46,9 @@ struct ContentView: View {
         .onChange(of: session.linkState) { _, _ in refreshVolumeButtons() }
         .onChange(of: session.hasConnectedOnce) { _, connected in
             if !connected { exitDarkMode() }
+        }
+        .onChange(of: session.signedIn) { _, signed in
+            if !signed { showMenu = false }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
@@ -131,7 +134,7 @@ struct ContentView: View {
 
     private var profileButton: some View {
         Button(action: openMenu) {
-            Image(systemName: "person.crop.circle")
+            Image(systemName: "gearshape")
                 .font(.system(size: 20, weight: .semibold))
                 .frame(width: 40, height: 40)
                 .glassEffect(.regular, in: Circle())
@@ -164,7 +167,11 @@ struct ContentView: View {
         case .connect:
             session.connect()
         case .cancel, .disconnect:
-            session.disconnect()
+            if session.restoringSession && !session.signedIn {
+                session.cancelAccountConnect()
+            } else {
+                session.disconnect()
+            }
         }
     }
 
@@ -616,10 +623,24 @@ private struct HomeMenu: View {
             ScrollView {
                 GlassEffectContainer(spacing: 16) {
                     VStack(alignment: .leading, spacing: 24) {
-                        accountHeader
-                        GroupEditor(session: session)
-                        serverField
-                        AccountFooter(session: session, onLogOut: logOut)
+                        SettingsBlock("Grupper") {
+                            GroupEditor(session: session)
+                        }
+                        SettingsBlock("Kontakter") {
+                            DirectSection(session: session)
+                        }
+                        SettingsBlock("Konto") {
+                            VStack(alignment: .leading, spacing: 16) {
+                                accountHeader
+                                AccountFooter(session: session, onLogOut: logOut)
+                            }
+                        }
+                        SettingsBlock("Om") {
+                            VStack(alignment: .leading, spacing: 16) {
+                                LegalLinks(server: session.serverURL)
+                                serverField
+                            }
+                        }
                     }
                     .padding(16)
                     .padding(.bottom, 8)
@@ -678,8 +699,146 @@ private struct HomeMenu: View {
     }
 }
 
-private struct AccountGate: View {
+private struct SettingsBlock<Content: View>: View {
+    var title: String
+    var content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content
+        }
+    }
+}
+
+private struct LoginWindow: View {
     @ObservedObject var session: WalkieSession
+    @State private var username = ""
+    @State private var password = ""
+    @State private var showSignUp = false
+    @FocusState private var focus: Field?
+
+    private enum Field: Hashable {
+        case username, password
+    }
+
+    var body: some View {
+        if showSignUp {
+            SignUpWindow(session: session, onClose: { showSignUp = false })
+        } else {
+            loginForm
+        }
+    }
+
+    private var loginForm: some View {
+        ScrollView {
+            GlassEffectContainer(spacing: 16) {
+                VStack(alignment: .leading, spacing: 16) {
+                    logo
+                    labeledField("Brukernavn") {
+                        TextField("brukernavn", text: $username)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .textContentType(.username)
+                            .submitLabel(.next)
+                            .focused($focus, equals: .username)
+                            .onSubmit { focus = .password }
+                            .glassFieldChrome()
+                    }
+                    labeledField("Passord") {
+                        SecureField("Minst 4 tegn", text: $password)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .textContentType(.password)
+                            .submitLabel(.go)
+                            .focused($focus, equals: .password)
+                            .onSubmit(logIn)
+                            .glassFieldChrome()
+                    }
+                    Button(action: logIn) {
+                        Text("Logg inn")
+                            .font(.title3.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .tint(Aurora.teal)
+                    .controlSize(.large)
+                    .disabled(busy)
+                    Button("Opprett bruker", action: { showSignUp = true })
+                        .buttonStyle(.plain)
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                    Button("Personvern", action: openPrivacy)
+                        .buttonStyle(.plain)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                    if busy {
+                        Text("Logger inn…")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                        Button("Avbryt") { session.cancelAccountConnect() }
+                            .buttonStyle(.glass)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .padding(24)
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .onAppear {
+            if username.isEmpty { username = session.accountUsername }
+        }
+    }
+
+    private var logo: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 34, weight: .semibold))
+                .frame(width: 88, height: 88)
+                .glassEffect(.regular.tint(Aurora.teal), in: Circle())
+            Text("Walkie")
+                .font(.largeTitle.weight(.bold))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, 16)
+    }
+
+    private var busy: Bool {
+        session.linkState == .connecting || session.linkState == .reconnecting
+    }
+
+    private func logIn() {
+        session.logIn(username: username, password: password)
+    }
+
+    private func openPrivacy() {
+        guard let url = WalkieSession.webPage("/personvern", server: session.serverURL) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    private func labeledField<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+    }
+}
+
+private struct SignUpWindow: View {
+    @ObservedObject var session: WalkieSession
+    var onClose: () -> Void
     @State private var username = ""
     @State private var displayName = ""
     @State private var password = ""
@@ -687,26 +846,20 @@ private struct AccountGate: View {
     @FocusState private var focus: Field?
 
     private enum Field: Hashable {
-        case username, displayName, password, server
+        case username, displayName, password
     }
 
     var body: some View {
         ScrollView {
-            GlassEffectContainer(spacing: 12) {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(spacing: 12) {
-                        Image(systemName: "dot.radiowaves.left.and.right")
-                            .font(.system(size: 34, weight: .semibold))
-                            .frame(width: 88, height: 88)
-                            .glassEffect(.regular.tint(Aurora.teal), in: Circle())
-                        Text("Walkie")
-                            .font(.largeTitle.weight(.bold))
-                        Text("Logg inn, eller opprett en konto.")
-                            .foregroundStyle(.secondary)
+            GlassEffectContainer(spacing: 16) {
+                VStack(alignment: .leading, spacing: 16) {
+                    Button(action: onClose) {
+                        Label("Tilbake", systemImage: "chevron.left")
+                            .font(.subheadline.weight(.semibold))
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.bottom, 4)
-
+                    .buttonStyle(.plain)
+                    Text("Opprett bruker")
+                        .font(.title2.weight(.semibold))
                     labeledField("Brukernavn") {
                         TextField("brukernavn", text: $username)
                             .textInputAutocapitalization(.never)
@@ -730,44 +883,27 @@ private struct AccountGate: View {
                         SecureField("Minst 4 tegn", text: $password)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .textContentType(.password)
+                            .textContentType(.newPassword)
                             .submitLabel(.go)
                             .focused($focus, equals: .password)
-                            .onSubmit { logIn() }
-                            .glassFieldChrome()
-                    }
-                    labeledField("Server") {
-                        TextField(WalkieSession.defaultServerURL, text: $session.serverURL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .keyboardType(.URL)
-                            .textContentType(.URL)
-                            .submitLabel(.go)
-                            .focused($focus, equals: .server)
-                            .onSubmit { logIn() }
+                            .onSubmit(signUp)
                             .glassFieldChrome()
                     }
                     Toggle("Jeg godtar vilkårene", isOn: $acceptedTerms)
                         .tint(Aurora.teal)
                     LegalLinks(server: session.serverURL)
                     Button(action: signUp) {
-                        Text("Opprett konto")
+                        Text("Opprett bruker")
                             .font(.title3.weight(.semibold))
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
+                            .padding(.vertical, 8)
                     }
                     .buttonStyle(.glassProminent)
                     .tint(Aurora.teal)
                     .controlSize(.large)
                     .disabled(busy || !acceptedTerms)
-                    Button(action: logIn) {
-                        Text("Logg inn")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.glass)
-                    .disabled(busy)
                     if busy {
-                        Label(session.restoringSession ? "Logger inn…" : session.statusText, systemImage: "ellipsis.circle.fill")
+                        Text("Oppretter konto…")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
@@ -776,8 +912,8 @@ private struct AccountGate: View {
                             .frame(maxWidth: .infinity)
                     }
                 }
+                .padding(24)
             }
-            .padding(24)
         }
         .scrollDismissesKeyboard(.interactively)
         .onAppear {
@@ -787,15 +923,11 @@ private struct AccountGate: View {
     }
 
     private var busy: Bool {
-        session.restoringSession || session.linkState == .connecting || session.linkState == .reconnecting
+        session.linkState == .connecting || session.linkState == .reconnecting
     }
 
     private func signUp() {
         session.signUp(username: username, displayName: displayName, password: password, acceptedTerms: acceptedTerms)
-    }
-
-    private func logIn() {
-        session.logIn(username: username, password: password)
     }
 
     private func labeledField<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -814,20 +946,16 @@ private struct GroupEditor: View {
     @State private var draftPassword = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 16) {
             if !session.invites.isEmpty {
                 InviteSection(session: session)
             }
             groupFields
-            DirectSection(session: session)
         }
     }
 
     private var groupFields: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Grupper")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
             TextField("Gruppenavn (f.eks. Familie)", text: $draftName)
                 .textInputAutocapitalization(.words)
                 .autocorrectionDisabled()
@@ -932,9 +1060,6 @@ private struct DirectSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Direkte")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
             HStack(spacing: 8) {
                 TextField("Brukernavn", text: $username)
                     .textInputAutocapitalization(.never)
@@ -1344,7 +1469,6 @@ private struct AccountFooter: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            LegalLinks(server: session.serverURL)
             Button("Logg ut", action: onLogOut)
                 .buttonStyle(.glass)
                 .frame(maxWidth: .infinity)

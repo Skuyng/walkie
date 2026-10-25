@@ -22,8 +22,8 @@ Du trenger en Mac med Xcode 26 og en iPhone med iOS 26 eller nyere. En betalt ut
 10. Øverst i vinduet velger du din iPhone som kjøringsmål. Simulatoren kan vise skjermen, men mikrofon, høyttaler og låst skjerm må prøves på telefonen.
 11. Trykk **Run** (▶). Første bygging tar litt tid. Telefonen må være ulåst.
 12. Hvis appen ikke starter fordi utvikleren ikke er klarert: på iPhone, **Innstillinger → Generelt → VPN og enhetsadministrasjon** (på noen versjoner heter det **Enhetsadministrasjon**). Velg profilen din og trykk **Stol på**.
-13. Åpne Walkie. Opprett en konto (brukernavn, visningsnavn, passord) eller logg inn. Ny konto krever at du godtar vilkårene.
-14. Etter innlogging er Talk-knappen midt på skjermen. Åpne **Innstillinger** med profilknappen eller kanalpillen for å opprette en gruppe, starte direkte, eller sjekke serveradressen. Trykk **Koble til** nederst. Tillat mikrofon når iOS spør. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe. **Logg ut** og **Slett konto** ligger i Innstillinger.
+13. Åpne Walkie. Innloggingsvinduet viser **Walkie**, brukernavn, passord og **Logg inn**. **Opprett bruker** åpner registrering, der vilkårene må godtas. **Personvern** ligger på innloggingen. Et lagret token hopper over innlogging.
+14. Etter innlogging er Talk-knappen midt på skjermen. Tannhjulet åpner **Innstillinger**: Grupper, Kontakter, Konto og Om. Trykk **Koble til** nederst. Tillat mikrofon når iOS spør. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe. **Logg ut** går tilbake til innlogging.
 
 En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xcode på nytt. Et personlig team kan bare ha noen få egne apper installert samtidig.
 
@@ -32,12 +32,12 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Brukernavn** — unikt, 3–20 tegn (a–z, 0–9, punktum, bindestrek, understrek).
 - **Visningsnavn** — det andre ser (maks 30 tegn).
 - **Passord** — minst 4 tegn. Serveren lagrer en scrypt-hash, ikke passordet.
-- **Logg ut** — i Innstillinger. Tokenet slettes fra Keychain.
-- **Vilkår** — må godtas før kontoen opprettes. Personvern og vilkår åpnes fra innlogging og fra Innstillinger.
+- **Logg ut** — under Konto i Innstillinger. Tokenet slettes fra Keychain, og innloggingsvinduet vises igjen.
+- **Vilkår** — må godtas før kontoen opprettes. Personvern åpnes fra innlogging. Personvern og vilkår åpnes fra Opprett bruker og fra Om.
 - **Blokker** — ved et annet medlem. Lyden deres spilles ikke av hos deg. Valget lagres på serveren.
 - **Rapporter** — ved et annet medlem, etter bekreftelse. Rapporten lagres på serveren.
-- **Slett konto** — i Innstillinger, etter bekreftelse. Brukeren, øktene og medlemskapene slettes. En gruppe du eier alene slettes. Ellers får det eldste andre medlemmet admin.
-- **Direkte** — i Innstillinger. Skriv et brukernavn og trykk **Be om kontakt**. Den andre godtar eller avslår. Kanalen viser den andres navn og en prikk når de er pålogget. Lytt og snakk som i en gruppe. **Avslutt** fjerner kanalen for begge. En blokkert bruker kan ikke kontaktes, og lyden deres spilles ikke av.
+- **Slett konto** — under Konto i Innstillinger, etter bekreftelse. Brukeren, øktene og medlemskapene slettes. En gruppe du eier alene slettes. Ellers får det eldste andre medlemmet admin.
+- **Direkte** — under Kontakter i Innstillinger. Skriv et brukernavn og trykk **Be om kontakt**. Den andre godtar eller avslår. Kanalen viser den andres navn og en prikk når de er pålogget. Lytt og snakk som i en gruppe. **Avslutt** fjerner kanalen for begge. En blokkert bruker kan ikke kontaktes, og lyden deres spilles ikke av.
 - **Opprett gruppe** — du blir admin. Store og små bokstaver er samme gruppe. Valgfritt **Passord** låser gruppen. Hashen lagres på serveren.
 - **Be om å bli med** — uten passord. Admin godkjenner eller avslår. Har du en invitasjon, godtar du den i stedet.
 - **Bli med** — når du skriver gruppepassordet, blir du medlem med en gang. Feil passord vises som «Feil passord». En lås vises på grupper som har passord.
