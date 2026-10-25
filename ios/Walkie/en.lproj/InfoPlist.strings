@@ -1,3 +1,2 @@
 "NSMicrophoneUsageDescription" = "TalkNet uses the microphone to send speech to the groups you belong to. Audio is sent directly and is not stored. The microphone is used only while you are connected.";
-"NSSpeechRecognitionUsageDescription" = "TalkNet uses on-device speech recognition to show captions of what others say. Captions stay on this phone.";
 "NSLocalNetworkUsageDescription" = "TalkNet connects to the server you enter, including on the local network.";

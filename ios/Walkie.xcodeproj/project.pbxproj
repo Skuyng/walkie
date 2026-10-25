@@ -22,8 +22,6 @@
 		A1000000000000000000000E /* AuroraChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* AuroraChrome.swift */; };
 		A1000000000000000000000F /* L10n.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* L10n.swift */; };
 		A10000000000000000000010 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* InfoPlist.strings */; };
-		A10000000000000000000013 /* CaptionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* CaptionEngine.swift */; };
-		A10000000000000000000014 /* Speech.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* Speech.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -44,8 +42,6 @@
 		A2000000000000000000000F /* L10n.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = L10n.swift; sourceTree = "<group>"; };
 		A20000000000000000000011 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		A20000000000000000000012 /* nb */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = nb; path = nb.lproj/InfoPlist.strings; sourceTree = "<group>"; };
-		A20000000000000000000013 /* CaptionEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionEngine.swift; sourceTree = "<group>"; };
-		A20000000000000000000014 /* Speech.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Speech.framework; path = System/Library/Frameworks/Speech.framework; sourceTree = SDKROOT; };
 		A30000000000000000000001 /* Walkie.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Walkie.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -56,7 +52,6 @@
 			files = (
 				A10000000000000000000009 /* MediaPlayer.framework in Frameworks */,
 				A1000000000000000000000C /* Security.framework in Frameworks */,
-				A10000000000000000000014 /* Speech.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -85,7 +80,6 @@
 				A20000000000000000000005 /* VoiceEngine.swift */,
 				A20000000000000000000006 /* PCM16.swift */,
 				A20000000000000000000007 /* TalkTransmitter.swift */,
-				A20000000000000000000013 /* CaptionEngine.swift */,
 				A20000000000000000000009 /* VolumeButtonMonitor.swift */,
 				A2000000000000000000000B /* Assets.xcassets */,
 				A20000000000000000000008 /* Info.plist */,
@@ -107,7 +101,6 @@
 			children = (
 				A2000000000000000000000A /* MediaPlayer.framework */,
 				A2000000000000000000000C /* Security.framework */,
-				A20000000000000000000014 /* Speech.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -194,7 +187,6 @@
 				A10000000000000000000005 /* VoiceEngine.swift in Sources */,
 				A10000000000000000000006 /* PCM16.swift in Sources */,
 				A10000000000000000000007 /* TalkTransmitter.swift in Sources */,
-				A10000000000000000000013 /* CaptionEngine.swift in Sources */,
 				A10000000000000000000008 /* VolumeButtonMonitor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

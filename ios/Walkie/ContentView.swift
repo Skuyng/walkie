@@ -135,19 +135,22 @@ struct ContentView: View {
 
     private var talkScreen: some View {
         GeometryReader { geo in
-            let side = min(geo.size.width - 64, max(220, geo.size.height - 288))
+            let lane = showListenVolume ? VolumeLane.extraLeading : 0
+            let column = geo.size.width - 32 - lane
+            let baseSide = min(geo.size.width - 64, max(220, geo.size.height - 288))
+            let side = showListenVolume ? min(baseSide * 0.92, column - 24) : baseSide
             ZStack {
                 GlassEffectContainer(spacing: 16) {
                     VStack(spacing: 16) {
                         homeTopBar
-                        JoinBanner(text: session.joinProblem(for: session.talkGroup))
-                        Spacer(minLength: 0)
-                        talkButton(side: side)
-                        HomePresence(session: session)
-                            .padding(.leading, showListenVolume ? 112 : 0)
-                            .animation(.easeOut(duration: 0.2), value: showListenVolume)
-                        captionBar
-                        Spacer(minLength: 0)
+                        VStack(spacing: 16) {
+                            JoinBanner(text: session.joinProblem(for: session.talkGroup))
+                            Spacer(minLength: 0)
+                            talkButton(side: side)
+                            HomePresence(session: session)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.leading, lane)
                         TalkBottomBar(
                             session: session,
                             link: linkAction,
@@ -157,11 +160,13 @@ struct ContentView: View {
                             onDark: enterDarkMode,
                             onLink: linkTapped
                         )
+                        .background(bottomBarAnchor)
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 4)
                     .padding(.bottom, 16)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .animation(.easeOut(duration: 0.2), value: showListenVolume)
                 }
             }
             .coordinateSpace(name: "talk")
@@ -177,12 +182,14 @@ struct ContentView: View {
                 listenChrome
                     .padding(.bottom, 92)
             }
-            .overlay {
+            .overlayPreferenceValue(TalkChromeKey.self) { chrome in
                 GeometryReader { proxy in
                     if showListenVolume && proxy.size.width > 1 {
                         ListenVolumePopover(
                             session: session,
                             bounds: proxy.size,
+                            pill: chrome.pill,
+                            bar: chrome.bar,
                             onDismiss: hideListenVolume,
                             onInteract: pokeListenVolume
                         )
@@ -302,6 +309,7 @@ struct ContentView: View {
         if showListenVolume {
             hideListenVolume()
         } else {
+            hideChannelMenu()
             showListenVolume = true
             scheduleVolumeHide()
         }
@@ -320,6 +328,9 @@ struct ContentView: View {
     }
 
     private func toggleChannelMenu() {
+        if !showChannelMenu {
+            hideListenVolume()
+        }
         withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
             showChannelMenu.toggle()
         }
@@ -359,19 +370,21 @@ struct ContentView: View {
         return session.tf(.leaveGroupAsk, name)
     }
 
-    @ViewBuilder
-    private var captionBar: some View {
-        if session.captionsEnabled && !session.captionText.isEmpty {
-            CaptionBar(speaker: session.captionSpeaker, text: session.captionText)
-                .opacity(session.captionVisible ? 1 : 0)
-                .padding(.horizontal, 112)
-                .animation(.easeOut(duration: 0.45), value: session.captionVisible)
-        }
-    }
-
     private var channelPillAnchor: some View {
         GeometryReader { proxy in
-            Color.clear.preference(key: ChannelPillAnchorKey.self, value: proxy.frame(in: .named("talk")))
+            Color.clear
+                .preference(key: ChannelPillAnchorKey.self, value: proxy.frame(in: .named("talk")))
+                .preference(key: TalkChromeKey.self, value: TalkChrome(pill: proxy.frame(in: .named("talk")), bar: .zero))
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var bottomBarAnchor: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: TalkChromeKey.self,
+                value: TalkChrome(pill: .zero, bar: proxy.frame(in: .named("talk")))
+            )
         }
         .allowsHitTesting(false)
     }
@@ -846,6 +859,26 @@ private struct ChannelPillAnchorKey: PreferenceKey {
     }
 }
 
+/// Pill and bottom-bar frames in the talk coordinate space, so the volume slider can sit between them.
+private struct TalkChrome: Equatable {
+    var pill: CGRect = .zero
+    var bar: CGRect = .zero
+}
+
+private struct TalkChromeKey: PreferenceKey {
+    static var defaultValue = TalkChrome()
+
+    static func reduce(value: inout TalkChrome, nextValue: () -> TalkChrome) {
+        let next = nextValue()
+        if next.pill.width > 0 {
+            value.pill = next.pill
+        }
+        if next.bar.width > 0 {
+            value.bar = next.bar
+        }
+    }
+}
+
 private enum ChannelPresence {
     case unknown, offline, online, talking
 }
@@ -1299,17 +1332,39 @@ private struct TalkBottomBar: View {
     }
 }
 
+/// Leading column reserved for the volume track. Content beside it starts at `contentStart`.
+private enum VolumeLane {
+    static let screenInset: CGFloat = 16
+    static let trackWidth: CGFloat = 36
+    static let touchWidth: CGFloat = 48
+    static let contentGap: CGFloat = 12
+    static let barClearance: CGFloat = 12
+    static let pillClearance: CGFloat = 12
+    static let labelHeight: CGFloat = 18
+    static let labelGap: CGFloat = 6
+    static let maxTrack: CGFloat = 260
+
+    static var contentStart: CGFloat { screenInset + trackWidth + contentGap }
+    /// Added on top of the screen's existing 16 pt padding.
+    static var extraLeading: CGFloat { contentStart - screenInset }
+    static var centerX: CGFloat { screenInset + trackWidth / 2 }
+}
+
+private struct VolumePlacement {
+    var centerY: CGFloat
+    var track: CGFloat
+    var block: CGFloat
+}
+
 /// Full-screen layer so the slider's frame sits inside a parent that can hit-test it.
-/// It stays on the leading edge of the lower half, clear of the talker line and captions.
+/// The track stays in the leading margin, between the channel pill and the bottom bar.
 private struct ListenVolumePopover: View {
     @ObservedObject var session: WalkieSession
     var bounds: CGSize
+    var pill: CGRect
+    var bar: CGRect
     var onDismiss: () -> Void
     var onInteract: () -> Void
-
-    private static let leadingInset: CGFloat = 16
-    private static let blockWidth: CGFloat = 88
-    private static let blockHeight: CGFloat = 292
 
     var body: some View {
         ZStack {
@@ -1317,62 +1372,51 @@ private struct ListenVolumePopover: View {
                 .frame(width: bounds.width, height: bounds.height)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onDismiss)
-            VStack(spacing: 6) {
+            sliderColumn
+        }
+        .frame(width: bounds.width, height: bounds.height)
+    }
+
+    @ViewBuilder
+    private var sliderColumn: some View {
+        if let place = placement {
+            VStack(spacing: VolumeLane.labelGap) {
                 Text(percentLabel)
                     .font(.system(size: 13, weight: .semibold).monospacedDigit())
                     .foregroundStyle(.white)
                     .shadow(color: .black.opacity(0.55), radius: 3, y: 1)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: VolumeLane.touchWidth, height: VolumeLane.labelHeight)
                     .contentShape(Rectangle())
                     .onTapGesture(perform: onInteract)
-                VerticalListenSlider(session: session, onInteract: onInteract)
+                VerticalListenSlider(
+                    session: session,
+                    trackHeight: place.track,
+                    onInteract: onInteract
+                )
             }
-            .frame(width: Self.blockWidth, height: Self.blockHeight)
-            .position(x: centerX, y: centerY)
+            .frame(width: VolumeLane.touchWidth, height: place.block)
+            .position(x: VolumeLane.centerX, y: place.centerY)
         }
-        .frame(width: bounds.width, height: bounds.height)
     }
 
     private var percentLabel: String {
         "\(Int((session.listenGain * 100).rounded()))%"
     }
 
-    /// Leading edge sits 16 pt in. The column is only the slider, so the centered status stays clear.
-    private var centerX: CGFloat {
-        Self.leadingInset + Self.blockWidth / 2
-    }
-
-    /// Vertical center of the lower half, kept fully on screen.
-    private var centerY: CGFloat {
-        let half = Self.blockHeight / 2
-        let preferred = bounds.height * 0.75
-        let lower = half + 8
-        let upper = max(lower, bounds.height - half - 8)
-        return min(max(preferred, lower), upper)
-    }
-}
-
-private struct CaptionBar: View {
-    var speaker: String
-    var text: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if !speaker.isEmpty {
-                Text(speaker)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Text(text)
-                .font(.body.weight(.medium))
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(3)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .accessibilityElement(children: .combine)
+    /// Height comes from the gap under the pill and 12 pt above the bar, capped at 260.
+    private var placement: VolumePlacement? {
+        guard pill.width > 1, bar.width > 1, bar.minY > pill.maxY else { return nil }
+        let labelBlock = VolumeLane.labelHeight + VolumeLane.labelGap
+        let top = pill.maxY + VolumeLane.pillClearance
+        let bottom = bar.minY - VolumeLane.barClearance
+        let span = bottom - top
+        let track = min(VolumeLane.maxTrack, span - labelBlock)
+        guard track >= VolumeLane.trackWidth else { return nil }
+        let block = labelBlock + track
+        let extra = max(0, span - block)
+        return VolumePlacement(centerY: top + extra / 2 + block / 2, track: track, block: block)
     }
 }
 
@@ -1401,28 +1445,25 @@ private final class VolumeDragActions {
 
 private struct VerticalListenSlider: View {
     @ObservedObject var session: WalkieSession
+    var trackHeight: CGFloat
     var onInteract: () -> Void
     @State private var actions = VolumeDragActions()
-
-    private static let trackWidth: CGFloat = 44
-    private static let touchWidth: CGFloat = 88
-    private static let trackHeight: CGFloat = 260
 
     var body: some View {
         ZStack {
             VolumeLevelTrack(
                 fraction: session.listenGain,
-                width: Self.trackWidth,
-                height: Self.trackHeight
+                width: VolumeLane.trackWidth,
+                height: trackHeight
             )
             VolumeDragTarget(
-                width: Self.touchWidth,
-                height: Self.trackHeight,
+                width: VolumeLane.touchWidth,
+                height: trackHeight,
                 actions: actions
             )
             .equatable()
         }
-        .frame(width: Self.touchWidth, height: Self.trackHeight)
+        .frame(width: VolumeLane.touchWidth, height: trackHeight)
         .accessibilityElement()
         .accessibilityLabel(session.t(.incomingVolume))
         .accessibilityValue(percentLabel)
@@ -1545,13 +1586,6 @@ private struct HomeMenu: View {
                         SettingsBlock(session.t(.groups)) {
                             GroupEditor(session: session)
                         }
-                        SettingsBlock(session.t(.captions)) {
-                            Toggle(session.t(.captions), isOn: captionsEnabled)
-                                .font(.body.weight(.semibold))
-                            Text(session.t(.captionsHint))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
                         SettingsBlock(session.t(.contacts)) {
                             DirectSection(session: session)
                         }
@@ -1609,13 +1643,6 @@ private struct HomeMenu: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var captionsEnabled: Binding<Bool> {
-        Binding(
-            get: { session.captionsEnabled },
-            set: { session.setCaptionsEnabled($0) }
-        )
     }
 
     private var language: Binding<AppLanguage> {

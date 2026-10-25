@@ -1,3 +1,2 @@
 "NSMicrophoneUsageDescription" = "TalkNet bruker mikrofonen for å sende tale til gruppene du er med i. Lyden sendes direkte og lagres ikke. Mikrofonen brukes bare mens du er tilkoblet.";
-"NSSpeechRecognitionUsageDescription" = "TalkNet bruker talegjenkjenning på enheten for å vise teksting av det andre sier. Tekstingen skjer på telefonen.";
 "NSLocalNetworkUsageDescription" = "TalkNet kobler til serveren du skriver inn, også på det lokale nettverket.";
