@@ -482,7 +482,7 @@ final class VoiceEngine {
 
         if !voiceProcessingDisabled {
             do {
-                try engine.setVoiceProcessingEnabled(true)
+                try engine.inputNode.setVoiceProcessingEnabled(true)
                 log.info("Voice processing on")
             } catch {
                 voiceProcessingDisabled = true
