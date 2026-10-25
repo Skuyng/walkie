@@ -221,63 +221,27 @@ final class WaveRing: @unchecked Sendable {
         remoteHiddenBefore.store(Self.stamp(CACurrentMediaTime()))
     }
 
-    fileprivate func points(
-        remote: Bool,
-        now: Double,
-        size: CGSize,
-        reach: CGFloat,
-        gain: CGFloat
-    ) -> [CGPoint] {
+    /// Latest mic loudness, 0 when nothing recent is coming in.
+    fileprivate func level(remote: Bool, now: Double) -> CGFloat {
         let values = remote ? remoteValue : micValue
         let times = remote ? remoteTime : micTime
         let cursor = remote ? remoteCursor.load() : micCursor.load()
         let hidden = remote ? remoteHiddenBefore.load() : micHiddenBefore.load()
-        let window = 0.48
-        let tStart = now - window
-        let midX = size.width * 0.5
-        let midY = size.height * 0.5
-        let half = midX
-        let oldest = max(0, cursor - Self.capacity)
-        var aged: [(CGFloat, CGFloat)] = []
-        aged.reserveCapacity(160)
-        var index = oldest
-        while index < cursor {
-            let slot = index & Self.mask
-            let time = times[slot]
-            let age = now - time
-            if time >= tStart && age >= 0 && Self.stamp(time) >= hidden {
-                aged.append((CGFloat(age / window), CGFloat(values[slot])))
+        guard cursor > 0 else { return 0 }
+        let newest = times[(cursor - 1) & Self.mask]
+        if now - newest > 0.12 || Self.stamp(newest) < hidden { return 0 }
+        let count = min(16, cursor)
+        var peak: Float = 0
+        var index = 0
+        while index < count {
+            let slot = (cursor - 1 - index) & Self.mask
+            if Self.stamp(times[slot]) >= hidden {
+                peak = max(peak, abs(values[slot]))
             }
             index += 1
         }
-        var raw: [CGPoint] = []
-        raw.reserveCapacity(aged.count * 2)
-        for item in aged {
-            raw.append(placed(item.0, item.1, sign: -1, midX: midX, midY: midY, half: half, width: size.width, reach: reach, gain: gain))
-        }
-        for item in aged.reversed() {
-            raw.append(placed(item.0, item.1, sign: 1, midX: midX, midY: midY, half: half, width: size.width, reach: reach, gain: gain))
-        }
-        return raw
-    }
-
-    /// Newest sample sits on the center line and the same shape leaves toward both edges.
-    private func placed(
-        _ fraction: CGFloat,
-        _ sample: CGFloat,
-        sign: CGFloat,
-        midX: CGFloat,
-        midY: CGFloat,
-        half: CGFloat,
-        width: CGFloat,
-        reach: CGFloat,
-        gain: CGFloat
-    ) -> CGPoint {
-        let x = midX + sign * min(1, max(0, fraction)) * half
-        let across = width > 0 ? x / width : 0
-        let bell = sin(min(1, max(0, across)) * .pi)
-        let shaped = max(-1, min(1, sample * (0.18 + 0.82 * bell) * gain))
-        return CGPoint(x: x, y: midY - shaped * reach)
+        if peak < 0.06 { return 0 }
+        return CGFloat(min(1, peak))
     }
 
     private func write(
@@ -349,7 +313,7 @@ struct TalkLevelFill: View {
     var receiving: Bool
 
     var body: some View {
-        TimelineView(.animation) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
             Canvas { context, size in
                 WaveDraw.draw(
                     context: &context,
@@ -387,21 +351,32 @@ private enum WaveDraw {
         let mid = size.height * 0.5
         let live = transmitting || receiving
         let subtler = receiving && !transmitting
-        var path = Path()
-        if live {
-            let reach = size.height * (subtler ? 0.2 : 0.34)
-            let samples = wave.points(remote: subtler, now: now, size: size, reach: reach, gain: subtler ? 0.6 : 1)
-            path = curve(samples, spike: size.height * 0.07, mid: mid, width: size.width)
-        }
-        if path.isEmpty {
-            path.move(to: CGPoint(x: 0, y: mid))
-            path.addLine(to: CGPoint(x: size.width, y: mid))
-        }
+        let amplitude = live ? wave.level(remote: subtler, now: now) * (subtler ? 0.6 : 1) : 0
+        let path = standing(size: size, mid: mid, now: now, amplitude: amplitude)
         context.drawLayer { layer in
             layer.addFilter(.blur(radius: 3))
             layer.stroke(path, with: .color(teal.opacity(0.35)), style: glow)
         }
         context.stroke(path, with: .color(teal), style: stroke)
+    }
+
+    /// Fixed points across the button. Loudness only changes how far they swing.
+    private static func standing(size: CGSize, mid: CGFloat, now: Double, amplitude: CGFloat) -> Path {
+        let columns = 48
+        let reach = size.height * 0.34
+        var points: [CGPoint] = []
+        points.reserveCapacity(columns + 1)
+        var index = 0
+        while index <= columns {
+            let across = CGFloat(index) / CGFloat(columns)
+            let envelope = sin(across * .pi)
+            let wobble = sin(now * 36 + Double(index) * 0.91) * 0.62
+                + sin(now * 61 + Double(index) * 1.57) * 0.38
+            let y = mid - CGFloat(wobble) * envelope * amplitude * reach
+            points.append(CGPoint(x: across * size.width, y: y))
+            index += 1
+        }
+        return curve(points, spike: size.height * 0.08, mid: mid, width: size.width)
     }
 
     /// Catmull-Rom through ordinary samples. Steep jumps stay straight so spikes stay sharp.
