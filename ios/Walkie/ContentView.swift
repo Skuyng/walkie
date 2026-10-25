@@ -42,6 +42,10 @@ struct ContentView: View {
             session.prepareVolumeHUD()
             refreshVolumeButtons()
             syncProximity(scenePhase)
+            if scenePhase == .active {
+                session.setCaptureWarm(true)
+                session.connectIfNeeded()
+            }
         }
         .onDisappear {
             exitDarkMode()
@@ -78,6 +82,7 @@ struct ContentView: View {
                 session.setCaptureWarm(true)
                 session.prepareVolumeHUD()
                 session.resumeAudioIfNeeded()
+                session.connectIfNeeded()
             }
             syncDarkMode(with: phase)
             syncProximity(phase)
@@ -332,7 +337,7 @@ struct ContentView: View {
             if session.restoringSession && !session.signedIn {
                 session.cancelAccountConnect()
             } else {
-                session.disconnect()
+                session.disconnectManually()
             }
         }
     }

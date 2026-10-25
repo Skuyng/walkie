@@ -23,7 +23,7 @@ Du trenger en Mac med Xcode 26 og en iPhone med iOS 26 eller nyere. En betalt ut
 11. Trykk **Run** (▶). Første bygging tar litt tid. Telefonen må være ulåst.
 12. Hvis appen ikke starter fordi utvikleren ikke er klarert: på iPhone, **Innstillinger → Generelt → VPN og enhetsadministrasjon** (på noen versjoner heter det **Enhetsadministrasjon**). Velg profilen din og trykk **Stol på**.
 13. Åpne TalkNet. Innloggingsvinduet viser **TalkNet**, brukernavn, passord og **Logg inn**. **Opprett bruker** åpner registrering, der vilkårene må godtas. **Personvern** ligger på innloggingen. Et lagret token hopper over innlogging.
-14. Etter innlogging er Talk-knappen midt på skjermen. Tannhjulet åpner **Innstillinger**: Språk, Grupper, Kontakter, Ikke forstyrr, Konto og Om. Trykk **Koble til** nederst. Tillat mikrofon når iOS spør. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe. **Logg ut** går tilbake til innlogging.
+14. Etter innlogging er Talk-knappen midt på skjermen. Tannhjulet åpner **Innstillinger**: Språk, Grupper, Kontakter, Ikke forstyrr, Konto og Om. Er du innlogget, kobler appen seg til siste kanal av seg selv når den åpnes, også neste gang etter at du har trykket **Koble fra**. Tillat mikrofon når iOS spør. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe. **Logg ut** går tilbake til innlogging.
 
 En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xcode på nytt. Et personlig team kan bare ha noen få egne apper installert samtidig.
 
@@ -45,7 +45,7 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Invitér** — admin skriver et brukernavn. Invitasjonen vises hos den andre under Invitasjoner, med Godta og Avslå.
 - **Fjern** — admin ser knappen ved andre medlemmer og må bekrefte. Den som blir fjernet får beskjed og hører ikke gruppen lenger. Admin kan ikke fjerne seg selv. Admin sletter gruppen. Medlemmer forlater den.
 - **Lytt** — på per gruppe. Du kan lytte til flere samtidig. Av gjør at du fortsatt ser hvem som er pålogget, men ikke hører lyden.
-- **Talk / Velg** — én gruppe om gangen. Hold-for-å-snakke og volum opp sender bare dit. Pillen øverst åpner en glassliste under seg, med Grupper og Direkte. Trykk en rad for å bytte kanal. Trykk utenfor for å lukke. Tannhjulet åpner fortsatt Innstillinger.
+- **Talk / Velg** — én gruppe om gangen. Hold-for-å-snakke og volum opp sender bare dit. Pillen øverst åpner en glassliste under seg, med Grupper og Direkte. Trykk en rad for å bytte kanal, så kobles den til med en gang. Siste kanal lagres. Finnes den ikke lenger, brukes den første gruppen eller direktesamtalen. Trykk utenfor for å lukke. Tannhjulet åpner fortsatt Innstillinger.
 - **Pålogget** — grønn prikk ved navnet. Den som snakker utheves.
 - **Server** — `wss://walkie-bc0z.onrender.com` som standard. `https://` gjøres om til `wss://`, og `http://` til `ws://`. Tomt felt bruker standardadressen.
 - **Hold for å snakke** — lyd sendes bare mens knappen holdes inne.
@@ -56,7 +56,7 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - Når noen andre begynner å snakke, spilles en kort tone, og navnet pulserer. Når de slipper, hører du en myk synkende tone.
 - **Siste melding** — den siste mottatte sendingen i kanalen ligger i minnet. En liten knapp nederst til høyre spiller den av igjen. Den sendes ikke videre.
 - **Ikke forstyrr** — i Innstillinger, med fra- og til-tid. Standard er 22:00–07:00, og bryteren er av til du slår den på. I tidsrommet er innkommende lyd dempet. Navnet vises likevel.
-- **Tilkobling** — en prikk og tekst vises når linjen er nede eller prøver igjen. Appen kobler til på nytt av seg selv, med lengre pause for hvert forsøk.
+- **Tilkobling** — en prikk og tekst vises når linjen er nede eller prøver igjen. Appen kobler til på nytt av seg selv, med lengre pause for hvert forsøk. Når du er innlogget, kobler den også til siste kanal ved oppstart og når den kommer tilbake i forgrunnen. **Koble fra** legger på til neste oppstart. **Koble til** kobler til igjen med en gang.
 - **Hodetelefoner** — avspillingsknappen veksler sending. Bluetooth-headset kan brukes både som samtale (HFP) og som avspilling (A2DP).
 
 ## Lyd og protokoll

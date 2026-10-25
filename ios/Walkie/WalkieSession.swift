@@ -149,6 +149,8 @@ final class WalkieSession: ObservableObject {
     private let headsetTalk = HeadsetTalkControl()
     private var activeURL: URL?
     private var shouldReconnect = false
+    /// Koble fra holds for this process only. The next launch connects again.
+    private var suppressAutoConnect = false
     private var connectTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var accountToken: String?
@@ -355,6 +357,7 @@ final class WalkieSession: ObservableObject {
     func logOut() {
         keepAccount = false
         shouldReconnect = false
+        suppressAutoConnect = false
         pendingAuth = nil
         restoringSession = false
         accountToken = nil
@@ -552,6 +555,7 @@ final class WalkieSession: ObservableObject {
         syncRoomName()
         saveGroups()
         pushSubscribe()
+        connectIfNeeded(overridingManual: true)
     }
 
     func searchUsers(raw: String) {
@@ -709,6 +713,20 @@ final class WalkieSession: ObservableObject {
         suggestsSettings = false
     }
 
+    /// Joins the last channel when a logged-in app opens or returns to the foreground.
+    /// A manual hang-up skips this until the next launch, or until the user picks a channel.
+    func connectIfNeeded(overridingManual: Bool = false) {
+        if overridingManual {
+            suppressAutoConnect = false
+        }
+        guard !suppressAutoConnect else { return }
+        guard signedIn else { return }
+        guard linkState == .signedIn || linkState == .disconnected else { return }
+        guard !groups.isEmpty else { return }
+        if AVAudioApplication.shared.recordPermission == .denied { return }
+        connect()
+    }
+
     func connect() {
         guard signedIn else {
             suggestsSettings = false
@@ -721,9 +739,8 @@ final class WalkieSession: ObservableObject {
             errorNotice = .key(.needGroup)
             return
         }
-        if !groups.contains(where: { $0.id == talkGroup }) {
-            talkGroup = groups[0].id
-        }
+        suppressAutoConnect = false
+        resolveTalkChannel()
         guard let url = Self.normalizeServerURL(serverURL) else {
             suggestsSettings = false
             errorNotice = .key(.badServer)
@@ -745,6 +762,12 @@ final class WalkieSession: ObservableObject {
         } else {
             connectTask = Task { await self.startAudioAndSocket() }
         }
+    }
+
+    /// Hang up from the bottom bar. The next launch still connects on its own.
+    func disconnectManually() {
+        suppressAutoConnect = true
+        disconnect()
     }
 
     func disconnect() {
@@ -1013,6 +1036,7 @@ final class WalkieSession: ObservableObject {
                 statusCode = .signedIn
             }
             savePreferences()
+            connectIfNeeded()
         case .inbox(let serverGroups, let nextInvites, let nextRequests, let blocked, let directs):
             blockedUsernames = blocked
             directRequests = directs
@@ -1352,6 +1376,17 @@ final class WalkieSession: ObservableObject {
         saveGroups()
         if signedIn && socketReady {
             pushSubscribe()
+        }
+        connectIfNeeded()
+    }
+
+    /// Last saved channel, or the first group or direct chat still on the account.
+    private func resolveTalkChannel() {
+        if groups.contains(where: { $0.id == talkGroup }) { return }
+        talkGroup = groups.first?.id ?? ""
+        syncRoomName()
+        if !talkGroup.isEmpty {
+            saveGroups()
         }
     }
 
