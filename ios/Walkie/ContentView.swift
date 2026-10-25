@@ -9,7 +9,6 @@ struct ContentView: View {
     @State private var showMenu = false
     @State private var listenToast = ""
     @State private var showListenToast = false
-    @State private var showListenVolume = false
     @State private var listenHide: Task<Void, Never>?
 
     var body: some View {
@@ -112,11 +111,7 @@ struct ContentView: View {
                         TalkBottomBar(
                             session: session,
                             link: linkAction,
-                            showVolume: showListenVolume,
                             onSpeaker: cycleListen,
-                            onSpeakerHold: revealListenVolume,
-                            onVolumeChanged: holdListenVolume,
-                            onVolumeEnded: releaseListenVolume,
                             onDark: enterDarkMode,
                             onLink: linkTapped
                         )
@@ -128,10 +123,6 @@ struct ContentView: View {
                 }
             }
             .coordinateSpace(name: "talk")
-            .overlay(alignment: .bottom) {
-                listenChrome
-                    .padding(.bottom, 92)
-            }
             .overlayPreferenceValue(WaveAnchorKey.self) { rect in
                 WaveOverlay(
                     rect: rect,
@@ -139,6 +130,15 @@ struct ContentView: View {
                     transmitting: session.isTalking,
                     receiving: !session.isTalking && !session.talkers.isEmpty
                 )
+            }
+            .overlay(alignment: .bottomLeading) {
+                VerticalListenSlider(session: session)
+                    .padding(.leading, 16)
+                    .padding(.bottom, 16)
+            }
+            .overlay(alignment: .bottom) {
+                listenChrome
+                    .padding(.bottom, 92)
             }
         }
     }
@@ -205,25 +205,10 @@ struct ContentView: View {
     }
 
     private func cycleListen() {
-        showListenVolume = false
         session.cycleListenOutput()
         listenToast = session.listenModeTitle
         showListenToast = true
-        scheduleListenHide(volume: false)
-    }
-
-    private func revealListenVolume() {
-        showListenToast = false
-        showListenVolume = true
-        scheduleListenHide(volume: true)
-    }
-
-    private func holdListenVolume() {
-        listenHide?.cancel()
-    }
-
-    private func releaseListenVolume() {
-        scheduleListenHide(volume: true)
+        scheduleListenHide()
     }
 
     /// Earpiece blanks the screen at the ear. Speaker, mute, and a real
@@ -234,16 +219,12 @@ struct ContentView: View {
         UIDevice.current.isProximityMonitoringEnabled = atEar
     }
 
-    private func scheduleListenHide(volume: Bool) {
+    private func scheduleListenHide() {
         listenHide?.cancel()
         listenHide = Task {
-            try? await Task.sleep(for: .seconds(volume ? 1.6 : 1.3))
+            try? await Task.sleep(for: .seconds(1.3))
             guard !Task.isCancelled else { return }
-            if volume {
-                showListenVolume = false
-            } else {
-                showListenToast = false
-            }
+            showListenToast = false
         }
     }
 
@@ -698,22 +679,17 @@ private struct PresenceFace: View {
 private struct TalkBottomBar: View {
     @ObservedObject var session: WalkieSession
     var link: HomeLink
-    var showVolume: Bool
     var onSpeaker: () -> Void
-    var onSpeakerHold: () -> Void
-    var onVolumeChanged: () -> Void
-    var onVolumeEnded: () -> Void
     var onDark: () -> Void
     var onLink: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            ListenModeButton(
+            TalkIconButton(
                 systemImage: session.listenSymbol,
                 title: session.listenModeTitle,
                 tint: speakerTint,
-                action: onSpeaker,
-                onLongPress: onSpeakerHold
+                action: onSpeaker
             )
             TalkIconButton(systemImage: "moon.fill", title: session.t(.darkMode), tint: .primary, action: onDark)
             if link == .connect {
@@ -733,16 +709,6 @@ private struct TalkBottomBar: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
         .glassEffect(.regular, in: Capsule())
-        .overlay(alignment: .topLeading) {
-            if showVolume {
-                VerticalListenSlider(
-                    session: session,
-                    onChanged: onVolumeChanged,
-                    onEnded: onVolumeEnded
-                )
-                .offset(x: 14, y: -156)
-            }
-        }
         .accessibilityElement(children: .contain)
     }
 
@@ -791,46 +757,12 @@ private struct TalkBottomBar: View {
     }
 }
 
-private struct ListenModeButton: View {
-    var systemImage: String
-    var title: String
-    var tint: Color
-    var action: () -> Void
-    var onLongPress: () -> Void
-    @State private var held = false
-
-    var body: some View {
-        Button(action: {
-            if held {
-                held = false
-                return
-            }
-            action()
-        }) {
-            Image(systemName: systemImage)
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 48, height: 48)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.45).onEnded { _ in
-                held = true
-                onLongPress()
-            }
-        )
-    }
-}
-
 private struct VerticalListenSlider: View {
     @ObservedObject var session: WalkieSession
-    var onChanged: () -> Void
-    var onEnded: () -> Void
     @State private var lastStep = -1
 
-    private static let trackWidth: CGFloat = 36
-    private static let trackHeight: CGFloat = 148
+    private static let trackWidth: CGFloat = 44
+    private static let trackHeight: CGFloat = 140
     private static let steps = 20
     /// #3EE6D0
     private static let level = Color(red: 62.0 / 255.0, green: 230.0 / 255.0, blue: 208.0 / 255.0)
@@ -840,6 +772,13 @@ private struct VerticalListenSlider: View {
             levelTrack(in: geo.size)
                 .contentShape(Capsule())
                 .gesture(drag(in: geo.size))
+                .overlay(alignment: .bottom) {
+                    Image(systemName: "speaker.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .padding(.bottom, 10)
+                        .allowsHitTesting(false)
+                }
         }
         .frame(width: Self.trackWidth, height: Self.trackHeight)
         .accessibilityElement()
@@ -882,10 +821,6 @@ private struct VerticalListenSlider: View {
                 let span = max(size.height, 1)
                 let y = min(max(0, value.location.y), span)
                 apply(1 - Double(y / span))
-                onChanged()
-            }
-            .onEnded { _ in
-                onEnded()
             }
     }
 
