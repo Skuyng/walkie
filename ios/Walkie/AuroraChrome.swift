@@ -98,32 +98,101 @@ final class WalkieHaptics {
 
 struct AuroraBackground: View {
     var live: Bool
+    @State private var driver = AuroraDriver()
+    @State private var pacing = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: live ? 1.0 / 30.0 : 1.0 / 12.0)) { timeline in
-            AuroraField(time: timeline.date.timeIntervalSinceReferenceDate, live: live)
+        TimelineView(.animation(minimumInterval: (live || pacing) ? 1.0 / 30.0 : 1.0 / 12.0)) { timeline in
+            AuroraFrame(driver: driver, live: live, time: timeline.date.timeIntervalSinceReferenceDate)
         }
         .ignoresSafeArea()
+        .onPreferenceChange(AuroraPaceKey.self) { pacing = $0 }
+        .onChange(of: live) { _, isLive in
+            if isLive { pacing = true }
+        }
+    }
+}
+
+/// Eases the field in over 0.6s and out over 0.9s. Phase is accumulated so the speed change does not jump.
+private final class AuroraDriver {
+    private var amount: Double = 0
+    private var origin: Double = 0
+    private var goal: Double = 0
+    private var began: Double = 0
+    private var span: Double = 0.6
+    private var primed = false
+    private var marked: Double = 0
+    private var phase: Double = 0
+    private var phaseY: Double = 0
+    private var seen: Double = -1
+    private var cached = AuroraSample(amount: 0, phase: 0, phaseY: 0)
+    private(set) var busy = false
+
+    func sample(live: Bool, now: Double) -> AuroraSample {
+        if now == seen { return cached }
+        let next: Double = live ? 1 : 0
+        if !primed || next != goal {
+            origin = amount
+            goal = next
+            began = now
+            span = next > origin ? 0.6 : 0.9
+            primed = true
+        }
+        let t = span <= 0 ? 1 : min(1, max(0, (now - began) / span))
+        amount = origin + (goal - origin) * easeInOut(t)
+        if abs(amount - goal) < 0.001 { amount = goal }
+        let dt = marked == 0 ? 1.0 / 30.0 : min(0.12, max(0, now - marked))
+        marked = now
+        let speed = 0.16 + (0.62 - 0.16) * amount
+        phase = (phase + dt * speed).truncatingRemainder(dividingBy: .pi * 2)
+        phaseY = (phaseY + dt * speed * 0.75).truncatingRemainder(dividingBy: .pi * 2)
+        busy = live || amount > 0.01
+        cached = AuroraSample(amount: amount, phase: phase, phaseY: phaseY)
+        seen = now
+        return cached
+    }
+}
+
+private struct AuroraSample {
+    var amount: Double
+    var phase: Double
+    var phaseY: Double
+}
+
+private struct AuroraPaceKey: PreferenceKey {
+    static var defaultValue = false
+
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
+}
+
+private struct AuroraFrame: View {
+    var driver: AuroraDriver
+    var live: Bool
+    var time: TimeInterval
+
+    var body: some View {
+        AuroraField(sample: driver.sample(live: live, now: time))
+            .preference(key: AuroraPaceKey.self, value: driver.busy)
     }
 }
 
 private struct AuroraField: View {
-    var time: TimeInterval
-    var live: Bool
+    var sample: AuroraSample
 
     var body: some View {
         ZStack {
             Aurora.ink
-            AuroraBlob(time: time, live: live, color: Aurora.green, phase: 0.4, size: 320, slot: 0)
-            AuroraBlob(time: time, live: live, color: Aurora.teal, phase: 2.1, size: 280, slot: 1)
-            AuroraBlob(time: time, live: live, color: Aurora.violet, phase: 4.2, size: 300, slot: 2)
+            AuroraBlob(sample: sample, color: Aurora.green, phase: 0.4, size: 320, slot: 0)
+            AuroraBlob(sample: sample, color: Aurora.teal, phase: 2.1, size: 280, slot: 1)
+            AuroraBlob(sample: sample, color: Aurora.violet, phase: 4.2, size: 300, slot: 2)
         }
     }
 }
 
 private struct AuroraBlob: View {
-    var time: TimeInterval
-    var live: Bool
+    var sample: AuroraSample
     var color: Color
     var phase: Double
     var size: CGFloat
@@ -133,28 +202,50 @@ private struct AuroraBlob: View {
         Circle()
             .fill(color)
             .frame(width: diameter, height: diameter)
-            .blur(radius: live ? 56 : 84)
-            .opacity(live ? 0.78 : 0.36)
+            .blur(radius: blur)
+            .opacity(opacity)
             .offset(x: driftX, y: driftY)
     }
 
-    private var speed: Double {
-        live ? 0.62 : 0.16
-    }
-
     private var driftX: CGFloat {
-        let spread = live ? 110.0 : 42.0
-        return CGFloat(cos(time * speed + phase) * spread + Double(slot - 1) * 16)
+        CGFloat(cos(sample.phase + phase) * spreadX + Double(slot - 1) * 16)
     }
 
     private var driftY: CGFloat {
-        let spread = live ? 86.0 : 28.0
-        return CGFloat(sin(time * speed * 0.75 + phase) * spread)
+        CGFloat(sin(sample.phaseY + phase) * spreadY)
+    }
+
+    private var spreadX: Double {
+        42 + (110 - 42) * sample.amount
+    }
+
+    private var spreadY: Double {
+        28 + (86 - 28) * sample.amount
+    }
+
+    private var blur: CGFloat {
+        CGFloat(84 - 28 * sample.amount)
     }
 
     private var diameter: CGFloat {
-        live ? size * 1.22 : size
+        size * CGFloat(1 + 0.22 * sample.amount)
     }
+
+    /// Idle stays barely visible. Talking and receiving ease up to the full field.
+    private var opacity: Double {
+        0.04 + (0.78 - 0.04) * sample.amount
+    }
+}
+
+private func easeInOut(_ t: Double) -> Double {
+    if t < 0.5 { return 4 * t * t * t }
+    let u = -2 * t + 2
+    return 1 - (u * u * u) / 2
+}
+
+private func easeOut(_ t: Double) -> Double {
+    let u = 1 - t
+    return 1 - u * u * u
 }
 
 /// Hardware atomic. One writer publishes the cursor only after the slots are filled.
@@ -189,6 +280,15 @@ final class WaveRing: @unchecked Sendable {
     /// Smoothed on the main thread only, from the canvas.
     private var shownLevel: CGFloat = 0
     private var shownAt: Double = 0
+    private var fallFrom: CGFloat = 0
+    private var fallBegan: Double = 0
+    private var falling = false
+    private var veil: Double = 0
+    private var veilFrom: Double = 0
+    private var veilGoal: Double = 0
+    private var veilBegan: Double = 0
+    private var veilSpan: Double = 0.2
+    private var veilReady = false
 
     init() {
         micValue = .allocate(capacity: Self.capacity)
@@ -224,16 +324,44 @@ final class WaveRing: @unchecked Sendable {
         remoteHiddenBefore.store(Self.stamp(CACurrentMediaTime()))
     }
 
-    /// Fast attack, light release. Main thread only.
-    fileprivate func displayLevel(remote: Bool, now: Double) -> CGFloat {
-        let raw = level(remote: remote, now: now)
+    /// Fast attack while sound is present. Silence eases to a flat line instead of snapping. Main thread only.
+    fileprivate func displayLevel(remote: Bool, live: Bool, gain: CGFloat, now: Double) -> CGFloat {
+        let raw = live ? level(remote: remote, now: now) * gain : 0
+        if raw < 0.001 {
+            if !falling {
+                fallFrom = shownLevel
+                fallBegan = now
+                falling = true
+            }
+            let t = min(1, max(0, (now - fallBegan) / 0.35))
+            shownLevel = fallFrom * CGFloat(1 - easeOut(t))
+            if t >= 1 || shownLevel < 0.001 { shownLevel = 0 }
+            shownAt = now
+            return shownLevel
+        }
+        falling = false
         let dt = shownAt == 0 ? 0.008 : min(0.05, max(0.001, now - shownAt))
         shownAt = now
         let tau = raw > shownLevel ? 0.016 : 0.05
         let alpha = CGFloat(1 - exp(-dt / tau))
         shownLevel += (raw - shownLevel) * alpha
-        if shownLevel < 0.012 { shownLevel = 0 }
-        return shownLevel
+        return min(1, shownLevel)
+    }
+
+    /// Soft fade for the stroke. In 0.2s, out 0.35s, both easeOut. Main thread only.
+    fileprivate func lineOpacity(live: Bool, now: Double) -> Double {
+        let next: Double = live ? 1 : 0
+        if !veilReady || next != veilGoal {
+            veilFrom = veil
+            veilGoal = next
+            veilBegan = now
+            veilSpan = live ? 0.2 : 0.35
+            veilReady = true
+        }
+        let t = veilSpan <= 0 ? 1 : min(1, max(0, (now - veilBegan) / veilSpan))
+        veil = veilFrom + (veilGoal - veilFrom) * easeOut(t)
+        if abs(veil - veilGoal) < 0.001 { veil = veilGoal }
+        return veil
     }
 
     /// Latest mic loudness, 0 when nothing recent is coming in.
@@ -366,13 +494,16 @@ private enum WaveDraw {
         let mid = size.height * 0.5
         let live = transmitting || receiving
         let subtler = receiving && !transmitting
-        let amplitude = live ? wave.displayLevel(remote: subtler, now: now) * (subtler ? 0.6 : 1) : 0
+        let gain: CGFloat = subtler ? 0.6 : 1
+        let amplitude = wave.displayLevel(remote: subtler, live: live, gain: gain, now: now)
+        let opacity = wave.lineOpacity(live: live, now: now)
+        if opacity < 0.004 && amplitude < 0.004 { return }
         let path = standing(size: size, mid: mid, now: now, amplitude: amplitude)
         context.drawLayer { layer in
             layer.addFilter(.blur(radius: 3))
-            layer.stroke(path, with: .color(teal.opacity(0.35)), style: glow)
+            layer.stroke(path, with: .color(teal.opacity(0.35 * opacity)), style: glow)
         }
-        context.stroke(path, with: .color(teal), style: stroke)
+        context.stroke(path, with: .color(teal.opacity(opacity)), style: stroke)
     }
 
     /// Fixed points across the button. Each point oscillates on its own; nothing travels sideways.
