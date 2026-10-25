@@ -14,7 +14,7 @@ enum VoiceEngineError: LocalizedError, Equatable {
         case .failedToStart:
             return "Fikk ikke startet lyden."
         case .microphoneDenied:
-            return "Walkie får ikke bruke mikrofonen. Åpne Innstillinger og slå på Mikrofon for Walkie."
+            return "TalkNet får ikke bruke mikrofonen. Åpne Innstillinger og slå på Mikrofon for TalkNet."
         }
     }
 }

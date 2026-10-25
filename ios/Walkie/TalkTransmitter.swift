@@ -64,7 +64,7 @@ final class HeadsetTalkControl {
         if enabled {
             UIApplication.shared.beginReceivingRemoteControlEvents()
             MPNowPlayingInfoCenter.default().nowPlayingInfo = [
-                MPMediaItemPropertyTitle: "Walkie",
+                MPMediaItemPropertyTitle: "TalkNet",
                 MPNowPlayingInfoPropertyIsLiveStream: true
             ]
             center.togglePlayPauseCommand.isEnabled = true

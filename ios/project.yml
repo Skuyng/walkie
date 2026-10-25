@@ -61,14 +61,14 @@ targets:
     info:
       path: Walkie/Info.plist
       properties:
-        CFBundleDisplayName: Walkie
-        CFBundleName: Walkie
+        CFBundleDisplayName: TalkNet
+        CFBundleName: TalkNet
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         CFBundleDevelopmentRegion: nb
         UILaunchScreen: {}
-        NSMicrophoneUsageDescription: Walkie bruker mikrofonen for å sende tale til gruppene du er med i. Lyden sendes direkte og lagres ikke. Mikrofonen brukes bare mens du er tilkoblet.
-        NSLocalNetworkUsageDescription: Walkie kobler til serveren du skriver inn, også på det lokale nettverket.
+        NSMicrophoneUsageDescription: TalkNet bruker mikrofonen for å sende tale til gruppene du er med i. Lyden sendes direkte og lagres ikke. Mikrofonen brukes bare mens du er tilkoblet.
+        NSLocalNetworkUsageDescription: TalkNet kobler til serveren du skriver inn, også på det lokale nettverket.
         UIBackgroundModes:
           - audio
         ITSAppUsesNonExemptEncryption: false

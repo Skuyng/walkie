@@ -1,6 +1,6 @@
-# Walkie for iPhone
+# TalkNet for iPhone
 
-Walkie er en enkel walkie-talkie. Appen kobler seg til den samme serveren som nettsiden. Du logger inn med brukernavn og passord, oppretter en gruppe (for eksempel Familie eller Jobb), eller ber om å bli med. Hold den store knappen inne for å snakke, eller hold volum opp inne. Du kan lytte til flere grupper samtidig, og velge én gruppe å snakke i. Du hører de andre også når skjermen er låst.
+TalkNet er en enkel walkie-talkie. Appen kobler seg til den samme serveren som nettsiden. Du logger inn med brukernavn og passord, oppretter en gruppe (for eksempel Familie eller Jobb), eller ber om å bli med. Hold den store knappen inne for å snakke, eller hold volum opp inne. Du kan lytte til flere grupper samtidig, og velge én gruppe å snakke i. Du hører de andre også når skjermen er låst.
 
 Standard server er `wss://walkie-bc0z.onrender.com`. Adressen kan endres i appen. Visningsnavn, lytting og server lagres på telefonen (UserDefaults). Innloggingstoken lagres i Keychain, så appen logger inn av seg selv neste gang.
 
@@ -17,12 +17,12 @@ Du trenger en Mac med Xcode 26 og en iPhone med iOS 26 eller nyere. En betalt ut
 5. Klikk det blå prosjektikonet **Walkie**. Under **TARGETS** velger du **Walkie**, og åpner fanen **Signing & Capabilities**.
 6. Kryss av **Automatically manage signing**.
 7. **Team** står tomt med vilje (`DEVELOPMENT_TEAM` er tom). Velg **Add an Account…**, logg inn med Apple-ID-en din, og velg teamet **Ditt navn (Personal Team)**.
-8. **Bundle Identifier** skal være `com.skuyng.walkie`. Visningsnavnet er **Walkie**. Hvis Xcode sier at identifikatoren er opptatt, endre den til noe unikt, for eksempel `com.skuyng.walkie.dittnavn`.
+8. **Bundle Identifier** skal være `com.skuyng.walkie`. Visningsnavnet er **TalkNet**. Hvis Xcode sier at identifikatoren er opptatt, endre den til noe unikt, for eksempel `com.skuyng.walkie.dittnavn`.
 9. Ikke legg til capabilities. Push Notifications og Push to Talk krever betalt konto og er ikke med i prosjektet.
 10. Øverst i vinduet velger du din iPhone som kjøringsmål. Simulatoren kan vise skjermen, men mikrofon, høyttaler og låst skjerm må prøves på telefonen.
 11. Trykk **Run** (▶). Første bygging tar litt tid. Telefonen må være ulåst.
 12. Hvis appen ikke starter fordi utvikleren ikke er klarert: på iPhone, **Innstillinger → Generelt → VPN og enhetsadministrasjon** (på noen versjoner heter det **Enhetsadministrasjon**). Velg profilen din og trykk **Stol på**.
-13. Åpne Walkie. Innloggingsvinduet viser **Walkie**, brukernavn, passord og **Logg inn**. **Opprett bruker** åpner registrering, der vilkårene må godtas. **Personvern** ligger på innloggingen. Et lagret token hopper over innlogging.
+13. Åpne TalkNet. Innloggingsvinduet viser **TalkNet**, brukernavn, passord og **Logg inn**. **Opprett bruker** åpner registrering, der vilkårene må godtas. **Personvern** ligger på innloggingen. Et lagret token hopper over innlogging.
 14. Etter innlogging er Talk-knappen midt på skjermen. Tannhjulet åpner **Innstillinger**: Grupper, Kontakter, Konto og Om. Trykk **Koble til** nederst. Tillat mikrofon når iOS spør. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe. **Logg ut** går tilbake til innlogging.
 
 En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xcode på nytt. Et personlig team kan bare ha noen få egne apper installert samtidig.
@@ -104,7 +104,7 @@ cd ios
 xcodegen generate
 ```
 
-`project.yml` setter bundle-id `com.skuyng.walkie`, visningsnavn Walkie, iOS 26 og tom `DEVELOPMENT_TEAM`. Språkmodus er Swift 5, slik at Xcode 26 ikke skrur på Swift 6-sjekkene som standard.
+`project.yml` setter bundle-id `com.skuyng.walkie`, visningsnavn TalkNet, iOS 26 og tom `DEVELOPMENT_TEAM`. Språkmodus er Swift 5, slik at Xcode 26 ikke skrur på Swift 6-sjekkene som standard.
 
 ## Begrensninger
 

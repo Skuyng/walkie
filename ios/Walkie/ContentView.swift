@@ -123,7 +123,7 @@ struct ContentView: View {
             TuningReadout(code: talkCode, name: channelName, mode: radioMode, action: openMenu)
                 .fixedSize(horizontal: true, vertical: false)
             HStack(spacing: 8) {
-                Text("Walkie")
+                Text("TalkNet")
                     .font(.title3.weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 8)
@@ -732,6 +732,10 @@ private struct HomeMenu: View {
                             VStack(alignment: .leading, spacing: 16) {
                                 LegalLinks(server: session.serverURL)
                                 serverField
+                                Text("Created by ™ Skutle")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary.opacity(0.75))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
                     }
@@ -870,10 +874,27 @@ private struct LoginWindow: View {
     }
 
     private var loginForm: some View {
-        ScrollView {
-            GlassEffectContainer(spacing: 16) {
-                VStack(alignment: .leading, spacing: 16) {
-                    logo
+        ZStack(alignment: .bottom) {
+            ScrollView {
+                loginFields
+                    .padding(.bottom, 36)
+            }
+            Text("Created by ™ Skutle")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.38))
+                .padding(.bottom, 12)
+                .allowsHitTesting(false)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .onAppear {
+            if username.isEmpty { username = session.accountUsername }
+        }
+    }
+
+    private var loginFields: some View {
+        GlassEffectContainer(spacing: 16) {
+            VStack(alignment: .leading, spacing: 16) {
+                logo
                     labeledField("Brukernavn") {
                         TextField("brukernavn", text: $username)
                             .textInputAutocapitalization(.never)
@@ -922,23 +943,20 @@ private struct LoginWindow: View {
                             .buttonStyle(.glass)
                             .frame(maxWidth: .infinity)
                     }
-                }
-                .padding(24)
             }
-        }
-        .scrollDismissesKeyboard(.interactively)
-        .onAppear {
-            if username.isEmpty { username = session.accountUsername }
+            .padding(24)
         }
     }
 
     private var logo: some View {
         VStack(spacing: 16) {
-            Image(systemName: "dot.radiowaves.left.and.right")
-                .font(.system(size: 34, weight: .semibold))
-                .frame(width: 88, height: 88)
-                .glassEffect(.regular.tint(Aurora.teal), in: Circle())
-            Text("Walkie")
+            Image("TalkNetLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 96, height: 96)
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .shadow(color: Color(red: 62 / 255, green: 230 / 255, blue: 208 / 255).opacity(0.45), radius: 18, y: 4)
+            Text("TalkNet")
                 .font(.largeTitle.weight(.bold))
         }
         .frame(maxWidth: .infinity)

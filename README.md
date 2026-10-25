@@ -1,4 +1,4 @@
-# Walkie
+# TalkNet
 
 Enkel walkie-talkie i nettleseren. Logg inn, opprett en gruppe eller be om å bli med, eller start en direkte samtale med et brukernavn. Hold inne knappen, og snakk. Du kan lytte til flere samtaler samtidig.
 
