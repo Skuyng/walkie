@@ -37,7 +37,7 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Blokker** — ved et annet medlem. Lyden deres spilles ikke av hos deg. Valget lagres på serveren.
 - **Rapporter** — ved et annet medlem, etter bekreftelse. Rapporten lagres på serveren.
 - **Slett konto** — under Konto i Innstillinger, etter bekreftelse. Brukeren, øktene og medlemskapene slettes. En gruppe du eier alene slettes. Ellers får det eldste andre medlemmet admin.
-- **Direkte** — under Kontakter i Innstillinger. Skriv et brukernavn og trykk **Søk bruker**. Den andre godtar eller avslår. Kanalen viser den andres navn og en prikk når de er pålogget. Lytt og snakk som i en gruppe. **Avslutt** fjerner kanalen for begge. En blokkert bruker kan ikke kontaktes, og lyden deres spilles ikke av.
+- **Direkte** — under Kontakter i Innstillinger. Skriv et brukernavn eller visningsnavn, med eller uten `@`, og trykk **Søk bruker**. Treff vises med navn og brukernavn. **Legg til** sender forespørselen. Finner den ingen, eller dere allerede er i kontakt, står det under feltet. Den andre godtar eller avslår. Kanalen viser den andres navn og en prikk når de er pålogget. Lytt og snakk som i en gruppe. **Avslutt** fjerner kanalen for begge. En blokkert bruker kan ikke kontaktes, og lyden deres spilles ikke av.
 - **Opprett gruppe** — du blir admin. Store og små bokstaver er samme gruppe. Valgfritt **Passord** låser gruppen. Hashen lagres på serveren.
 - **Be om å bli med** — uten passord. Admin godkjenner eller avslår. Har du en invitasjon, godtar du den i stedet.
 - **Bli med** — når du skriver gruppepassordet, blir du medlem med en gang. Feil passord vises som «Feil passord». En lås vises på grupper som har passord.
@@ -51,7 +51,7 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Hold for å snakke** — lyd sendes bare mens knappen holdes inne.
 - **Volum opp** — hold inne for å snakke, og slipp for å stoppe, mens appen er tilkoblet og i forgrunnen. Lydnivået settes tilbake etter at du slipper. Systemets volumvisning skjules i vanlig visning og i mørk modus.
 - **Språk** — Norsk eller English under Innstillinger. Første gang følges telefonen; ellers blir det norsk. Valget lagres og gjelder med en gang, uten omstart. Talk-knappen heter Talk på begge språk. Systemets mikrofon-spørsmål følger telefonens språk.
-- **Høyttaler** — på som standard. På sender lyden i høyttaleren. Av bruker ørepluggen, med mindre hodetelefoner eller Bluetooth er koblet til. Valget lagres på telefonen.
+- **Lytting** — knappen nederst til venstre veksler Høyttaler, Øretelefon og Dempet. Et kort merke viser valget. Hold knappen inne for volum på innkommende lyd. Volum opp er opptatt med å snakke, så dette volumet er inne i appen. Bluetooth-headset har fortsatt prioritet når det er koblet til. Valget og volumet lagres på telefonen.
 - **Mørk modus** — svart skjerm, lav lysstyrke, og telefonen holder seg våken. Et svakt rødt punkt vises mens du sender. Trykk skjermen for å avslutte. Volum opp virker her også.
 - Når noen andre begynner å snakke, spilles en kort tone, og navnet pulserer. Når de slipper, hører du en myk synkende tone.
 - **Siste melding** — den siste mottatte sendingen i kanalen ligger i minnet. En liten knapp nederst til høyre spiller den av igjen. Den sendes ikke videre.
@@ -85,9 +85,9 @@ Nettleseren plukker nærmeste sample når den nedsampler. iOS bruker `AVAudioCon
 
 ## Bakgrunn og låst skjerm
 
-`Info.plist` har `UIBackgroundModes` satt til `audio`. Det trengs for at tale skal kunne spilles av når skjermen er låst. Appen lagrer ikke opptak. Siste melding ligger bare i minnet til appen lukkes eller du logger ut. Når du bare lytter, er økten avspilling (`.playback`) uten mikrofontap og uten voice processing, så den oransje mikrofonprikken er av. Innkommende lyd spilles fortsatt når skjermen er låst. **Høyttaler** av og ingen hodesett bruker `playAndRecord` bare for å velge ørepluggen, fortsatt uten å åpne mikrofonen. Når du holder Talk, bytter økten til `playAndRecord` med modus `.default` (ikke `.voiceChat`), skrur på voice processing på inngangsnoden, og spiller den korte klar-tonen før mikrofonen sendes. Når du slipper, fjernes tapet, voice processing skrus av, og økten går tilbake til avspilling. Bluetooth tillater både `allowBluetoothHFP` og `allowBluetoothA2DP` mens du sender. Et tilkoblet hodesett beholder ruten. **Høyttaler** på legger til `defaultToSpeaker` og tvinger høyttaler bare når ingen ekstern utgang er koblet til. Av lar lyden gå i ørepluggen når det ikke er et hodesett. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle.
+`Info.plist` har `UIBackgroundModes` satt til `audio`. Det trengs for at tale skal kunne spilles av når skjermen er låst. Appen lagrer ikke opptak. Siste melding ligger bare i minnet til appen lukkes eller du logger ut. Mens appen er i forgrunnen og tilkoblet, står lydmotoren i `playAndRecord` med voice processing slått på én gang og mikrofontapet installert. Porten er lukket til du trykker Talk. Trykk åpner porten med en gang, og den korte klar-tonen spilles samtidig lokalt. Voice processing holder tonen ute av sendingen. Den oransje mikrofonprikken kan lyse mens appen er i forgrunnen. Når appen er i bakgrunnen og ingen snakker, er økten `.playback` uten tap og uten voice processing, så prikken er av, og innkommende lyd spilles fortsatt på låst skjerm. Når du slipper Talk, sendes omtrent 200 ms til før porten lukkes. Modus er `.default`, ikke `.voiceChat`. Bluetooth tillater både `allowBluetoothHFP` og `allowBluetoothA2DP`. Et tilkoblet hodesett beholder ruten foran høyttaler og øretelefon. **Høyttaler** legger til `defaultToSpeaker` bare når ingen ekstern utgang er koblet til. **Øretelefon** bruker ørepluggen i forgrunnen. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle.
 
-Den oransje mikrofonprikken lyser mens Talk holdes inne (knappen, volum opp, eller hodetelefonens avspillingsknapp). Den er av når du bare lytter med høyttaler eller hodesett. Med **Høyttaler** av og ingen hodesett er økten `playAndRecord` kun for å velge ørepluggen, uten mikrofontap; iOS kan likevel vise prikken i det tilfellet.
+Dette er ikke prøvd på en fysisk iPhone herfra.
 
 Dette er ikke Apples Push to Talk. Det rammeverket er ikke koblet inn.
 
@@ -110,5 +110,5 @@ xcodegen generate
 ## Begrensninger
 
 - To personer med samme visningsnavn vises som to rader, én per tilkobling.
-- Låst skjerm er satt opp med lydmodus og en aktiv avspillingsøkt. Mikrofonen åpnes bare mens Talk holdes. Det er ikke prøvd på en fysisk iPhone herfra. iOS kan likevel stanse appen hvis det er lite ledig minne.
+- Låst skjerm er avspilling uten mikrofon. I forgrunnen kan den oransje prikken lyse fordi inngangen står klar. Det er ikke prøvd på en fysisk iPhone herfra. iOS kan likevel stanse appen hvis det er lite ledig minne.
 - `ws://` mot offentlig nett kan bli stoppet av App Transport Security. Bruk `wss://` mot Render. Lokalt nett er tillatt.

@@ -25,7 +25,10 @@ final class WalkieSession: ObservableObject {
     @Published private(set) var errorNotice: AppNotice?
     @Published private(set) var suggestsSettings = false
     @Published private(set) var hasConnectedOnce = false
-    @Published var speakerphone: Bool
+    @Published private(set) var listenOutput: ListenOutput
+    @Published private(set) var listenGain: Double
+    @Published private(set) var userMatches: [UserMatch] = []
+    @Published private(set) var contactNote = ""
     @Published private(set) var signedIn = false
     @Published private(set) var restoringSession = false
     @Published private(set) var accountUsername = ""
@@ -155,6 +158,10 @@ final class WalkieSession: ObservableObject {
     private var socketReady = false
     /// Bumps when talk ends so a late ready chirp does not open the mic.
     private var readyGeneration = 0
+    /// Talk-stop waits until the release tail has actually been sent.
+    private var pendingStop = false
+    private var userSearchQuery = ""
+    private var pendingAdd = ""
     private var preferTalk: String?
     private var reconnectAttempt = 0
     private var quietTimer: Timer?
@@ -183,13 +190,16 @@ final class WalkieSession: ObservableObject {
         room = storedGroups.first { $0.id == storedTalk }?.name ?? storedRoom
         serverURL = storedServer.isEmpty ? Self.defaultServerURL : storedServer
         accountUsername = defaults.string(forKey: Key.username) ?? ""
-        speakerphone = defaults.object(forKey: Key.speakerphone) as? Bool ?? true
+        listenOutput = Self.storedListenOutput(defaults)
+        let storedGain = defaults.object(forKey: Key.listenGain) as? Double ?? 1
+        listenGain = min(1, max(0, storedGain))
         language = AppLanguage.resolved(stored: defaults.string(forKey: Key.language))
         quietHoursEnabled = defaults.bool(forKey: Key.quietEnabled)
         quietFromMinutes = Self.clampMinutes(defaults.object(forKey: Key.quietFrom) as? Int ?? (22 * 60))
         quietToMinutes = Self.clampMinutes(defaults.object(forKey: Key.quietTo) as? Int ?? (7 * 60))
-        engine.setSpeakerphone(speakerphone)
-        engine.setIncomingMuted(Self.quietHoursCover(enabled: quietHoursEnabled, from: quietFromMinutes, to: quietToMinutes, at: Date()))
+        engine.setListenGain(Float(listenGain))
+        engine.setSpeakerphone(listenOutput != .earpiece)
+        engine.setIncomingMuted(Self.quietHoursCover(enabled: quietHoursEnabled, from: quietFromMinutes, to: quietToMinutes, at: Date()) || listenOutput == .mute)
         engine.attachLevelMeter(levels.wave)
         engine.activateForSystemVolume()
 
@@ -237,6 +247,13 @@ final class WalkieSession: ObservableObject {
                 guard let self else { return }
                 self.volumeButtons.noteSessionReconfigured()
                 self.haptics.prepare()
+            }
+        }
+        engine.onSendIdle = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.pendingStop else { return }
+                self.pendingStop = false
+                self.socket.sendStop(room: self.talkGroup)
             }
         }
         if let token = AccountTokenStore.load(), !token.isEmpty {
@@ -350,6 +367,10 @@ final class WalkieSession: ObservableObject {
         requests = []
         blockedUsernames = []
         directRequests = []
+        userMatches = []
+        contactNote = ""
+        userSearchQuery = ""
+        pendingAdd = ""
         talkGroup = ""
         room = ""
         preferTalk = nil
@@ -533,26 +554,43 @@ final class WalkieSession: ObservableObject {
         pushSubscribe()
     }
 
-    @discardableResult
-    func requestDirect(username rawUser: String) -> Bool {
-        let user = Self.normalizeUsername(rawUser)
-        guard Self.validUsername(user) else {
-            suggestsSettings = false
-            errorNotice = .key(.enterUsername)
-            return false
-        }
-        guard user != accountUsername else {
-            suggestsSettings = false
-            errorNotice = .key(.cannotContactSelf)
-            return false
+    func searchUsers(raw: String) {
+        let query = Self.contactQuery(raw)
+        userSearchQuery = query
+        pendingAdd = ""
+        userMatches = []
+        guard !query.isEmpty else {
+            contactNote = "Skriv et brukernavn."
+            return
         }
         guard signedIn, socketOpen else {
-            suggestsSettings = false
-            errorNotice = .key(.signIn)
-            return false
+            contactNote = "Logg inn"
+            return
         }
+        contactNote = ""
+        socket.sendSearchUsers(username: query)
+    }
+
+    func addContact(username rawUser: String) {
+        let user = Self.normalizeUsername(Self.contactQuery(rawUser))
+        guard Self.validUsername(user) else {
+            contactNote = "Skriv et brukernavn."
+            return
+        }
+        guard user != accountUsername else {
+            contactNote = "Du kan ikke kontakte deg selv."
+            return
+        }
+        guard signedIn, socketOpen else {
+            contactNote = "Logg inn"
+            return
+        }
+        pendingAdd = user
+        if let index = userMatches.firstIndex(where: { $0.username == user }) {
+            userMatches[index].state = "sent"
+        }
+        contactNote = ""
         socket.sendDirect(username: user)
-        return true
     }
 
     func replyDirect(username: String, accept: Bool) {
@@ -595,9 +633,61 @@ final class WalkieSession: ObservableObject {
         pushSubscribe()
     }
 
-    func saveSpeakerphone() {
-        defaults.set(speakerphone, forKey: Key.speakerphone)
-        engine.setSpeakerphone(speakerphone)
+    var listenModeTitle: String {
+        switch listenOutput {
+        case .speaker: return t(.listenSpeaker)
+        case .earpiece: return t(.listenEarpiece)
+        case .mute: return t(.listenMuted)
+        }
+    }
+
+    var listenSymbol: String {
+        switch listenOutput {
+        case .speaker: return "speaker.wave.3.fill"
+        case .earpiece: return "ear.fill"
+        case .mute: return "speaker.slash.fill"
+        }
+    }
+
+    func cycleListenOutput() {
+        let next: ListenOutput
+        switch listenOutput {
+        case .speaker: next = .earpiece
+        case .earpiece: next = .mute
+        case .mute: next = .speaker
+        }
+        setListenOutput(next)
+    }
+
+    func setListenOutput(_ output: ListenOutput) {
+        listenOutput = output
+        defaults.set(output.rawValue, forKey: Key.listenOutput)
+        defaults.set(output != .earpiece, forKey: Key.speakerphone)
+        applyListenRoute()
+    }
+
+    private func applyListenRoute() {
+        engine.setIncomingMuted(isQuietHours() || listenOutput == .mute)
+        switch listenOutput {
+        case .speaker:
+            engine.setSpeakerphone(true)
+        case .earpiece:
+            engine.setSpeakerphone(false)
+        case .mute:
+            break
+        }
+    }
+
+    func setListenGain(_ value: Double) {
+        let clamped = min(1, max(0, value))
+        listenGain = clamped
+        defaults.set(clamped, forKey: Key.listenGain)
+        engine.setListenGain(Float(clamped))
+    }
+
+    /// Foreground keeps the capture graph warm. Background idle cools it.
+    func setCaptureWarm(_ active: Bool) {
+        engine.setCaptureWarm(active)
     }
 
     /// Audio session plus the key-window volume slider. Safe to call again
@@ -664,6 +754,10 @@ final class WalkieSession: ObservableObject {
         reconnectTask?.cancel()
         setVolumeButtonMonitoringEnabled(false)
         endTransmitting()
+        if pendingStop {
+            pendingStop = false
+            socket.sendStop(room: talkGroup)
+        }
         engine.stop()
         audioReady = false
         hasConnectedOnce = false
@@ -707,7 +801,8 @@ final class WalkieSession: ObservableObject {
         }
     }
 
-    /// Stops sending and returns the audio session to playback.
+    /// Stops the hold. The mic gate stays open for a short tail, and the
+    /// foreground engine stays warm.
     func endTransmitting() {
         let was = transmitter.isTransmitting
         transmitter.endTransmitting()
@@ -922,6 +1017,11 @@ final class WalkieSession: ObservableObject {
             blockedUsernames = blocked
             directRequests = directs
             applyInbox(serverGroups, invites: nextInvites, requests: nextRequests)
+            noteContactRequests()
+        case .userSearch(let query, let matches, let error):
+            guard query == userSearchQuery else { return }
+            userMatches = matches
+            contactNote = matches.isEmpty ? (error.isEmpty ? "Fant ikke brukeren" : error) : ""
         case .reported:
             suggestsSettings = false
             errorNotice = .key(.reportSent)
@@ -965,6 +1065,8 @@ final class WalkieSession: ObservableObject {
                 invites = []
                 requests = []
                 directRequests = []
+                userMatches = []
+                contactNote = ""
                 audioReady = false
                 hasConnectedOnce = false
                 engine.stop()
@@ -981,6 +1083,11 @@ final class WalkieSession: ObservableObject {
             }
             if text == "Du er fjernet fra gruppen" || text == "Direktekanalen er avsluttet" {
                 endTransmitting()
+            }
+            if room.isEmpty && Self.isContactPhrase(text) {
+                contactNote = text
+                applyContactError(text)
+                return
             }
             if !room.isEmpty {
                 joinProblems[room] = text
@@ -1025,7 +1132,44 @@ final class WalkieSession: ObservableObject {
     }
 
     private func applyQuietHours() {
-        engine.setIncomingMuted(isQuietHours())
+        engine.setIncomingMuted(isQuietHours() || listenOutput == .mute)
+    }
+
+    private func noteContactRequests() {
+        for index in userMatches.indices {
+            let username = userMatches[index].username
+            if let request = directRequests.first(where: { $0.username == username }) {
+                userMatches[index].state = request.incoming ? "incoming" : "sent"
+            } else if groups.contains(where: { $0.direct && $0.peer == username }) {
+                userMatches[index].state = "contact"
+            }
+        }
+        guard !pendingAdd.isEmpty else { return }
+        if directRequests.contains(where: { $0.username == pendingAdd && $0.incoming == false }) {
+            contactNote = "Forespørselen er sendt."
+            pendingAdd = ""
+        }
+    }
+
+    private func applyContactError(_ text: String) {
+        guard !pendingAdd.isEmpty, let index = userMatches.firstIndex(where: { $0.username == pendingAdd }) else {
+            pendingAdd = ""
+            return
+        }
+        if text.contains("allerede direkte") {
+            userMatches[index].state = "contact"
+        } else if text.contains("Forespørselen er sendt") {
+            userMatches[index].state = "sent"
+        } else if text.contains("forespørsel") {
+            userMatches[index].state = "incoming"
+        } else if text.contains("denne brukeren") {
+            userMatches[index].state = "blocked"
+        } else if text.contains("deg selv") {
+            userMatches[index].state = "self"
+        } else {
+            userMatches[index].state = "add"
+        }
+        pendingAdd = ""
     }
 
     private func isQuietHours(at date: Date = Date()) -> Bool {
@@ -1304,6 +1448,8 @@ final class WalkieSession: ObservableObject {
         static let room = "walkie.room"
         static let server = "walkie.serverURL"
         static let speakerphone = "walkie.speakerphone"
+        static let listenOutput = "walkie.listenOutput"
+        static let listenGain = "walkie.listenGain"
         static let groups = "walkie.groups"
         static let talkGroup = "walkie.talkGroup"
         static let username = "walkie.username"
@@ -1311,6 +1457,48 @@ final class WalkieSession: ObservableObject {
         static let quietFrom = "walkie.quiet.from"
         static let quietTo = "walkie.quiet.to"
         static let language = "walkie.language"
+    }
+
+    private static func storedListenOutput(_ defaults: UserDefaults) -> ListenOutput {
+        if let raw = defaults.string(forKey: Key.listenOutput), let mode = ListenOutput(rawValue: raw) {
+            return mode
+        }
+        if let speaker = defaults.object(forKey: Key.speakerphone) as? Bool {
+            return speaker ? .speaker : .earpiece
+        }
+        return .speaker
+    }
+
+    private static func isContactPhrase(_ text: String) -> Bool {
+        text == "Skriv et brukernavn."
+            || text == "Fant ikke brukeren"
+            || text == "Du kan ikke kontakte deg selv."
+            || text == "Du kan ikke kontakte denne brukeren."
+            || text == "Dere snakker allerede direkte."
+            || text == "Forespørselen er sendt."
+            || text == "Forespørselen er sendt"
+            || text == "Du har en forespørsel. Godta den."
+            || text == "Logg inn"
+    }
+
+    /// Trim, drop a leading @, and collapse whitespace. Case stays for display-name search.
+    static func contactQuery(_ raw: String) -> String {
+        var text = raw
+            .replacingOccurrences(of: "\u{200B}", with: "")
+            .replacingOccurrences(of: "\u{200C}", with: "")
+            .replacingOccurrences(of: "\u{200D}", with: "")
+            .replacingOccurrences(of: "\u{FEFF}", with: "")
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasPrefix("@") {
+            text.removeFirst()
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let parts = text.split { $0.isWhitespace }
+        text = parts.joined(separator: " ")
+        if text.count > 40 {
+            text = String(text.prefix(40))
+        }
+        return text
     }
 
     private static func normalizeUsername(_ raw: String) -> String {
@@ -1333,11 +1521,12 @@ final class WalkieSession: ObservableObject {
 
 extension WalkieSession: ChannelSignaling {
     func sendTalkStart() {
+        pendingStop = false
         socket.sendStart(room: talkGroup)
     }
 
     func sendTalkStop() {
-        socket.sendStop(room: talkGroup)
+        pendingStop = true
     }
 
     func setMicrophoneOpen(_ open: Bool) {
@@ -1348,21 +1537,43 @@ extension WalkieSession: ChannelSignaling {
         }
         readyGeneration += 1
         let generation = readyGeneration
-        engine.prepareCapture { [weak self] ready in
-            guard let self else { return }
-            guard ready, self.isTalking, self.readyGeneration == generation else {
-                self.engine.setMicrophoneOpen(false)
-                return
-            }
-            guard self.audioReady, self.socketReady, self.socketOpen else {
-                self.engine.setMicrophoneOpen(true)
-                return
-            }
-            self.engine.playReadyChirp { [weak self] in
-                guard let self, self.isTalking, self.readyGeneration == generation else { return }
-                self.engine.setMicrophoneOpen(true)
-            }
+        let ready = engine.beginSending()
+        guard ready, isTalking, readyGeneration == generation else {
+            if ready { engine.setMicrophoneOpen(false) }
+            return
         }
+        guard audioReady, socketReady, socketOpen else { return }
+        engine.playReadyChirp { }
+    }
+}
+
+enum ListenOutput: String {
+    case speaker
+    case earpiece
+    case mute
+}
+
+struct UserMatch: Identifiable, Equatable, Decodable {
+    var username: String
+    var name: String
+    var state: String
+    var id: String { username }
+
+    private enum CodingKeys: String, CodingKey {
+        case username, name, state
+    }
+
+    init(username: String, name: String, state: String) {
+        self.username = username
+        self.name = name
+        self.state = state
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        username = try container.decode(String.self, forKey: .username)
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        state = try container.decodeIfPresent(String.self, forKey: .state) ?? "add"
     }
 }
 

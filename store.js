@@ -113,6 +113,20 @@ function oldestOther(members, userId) {
     .sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0) || String(a.userId).localeCompare(String(b.userId)))[0];
 }
 
+function namesMatch(left, right) {
+  return String(left || '').trim().toLowerCase() === String(right || '').trim().toLowerCase();
+}
+
+function rankContact(user, needle) {
+  const username = String(user.username || '').trim().toLowerCase();
+  const display = String(user.displayName || '').trim().toLowerCase();
+  if (username === needle) return 0;
+  if (display === needle) return 1;
+  if (username.startsWith(needle)) return 2;
+  if (username.includes(needle) || display.includes(needle)) return 3;
+  return 4;
+}
+
 function directRoomId(idA, idB) {
   const pair = [idA, idB].sort().join(':');
   return 'dm' + crypto.createHash('sha256').update(pair).digest('hex').slice(0, 32);
@@ -494,8 +508,11 @@ class JsonStore {
 
   directRequest(fromId, username) {
     return this.enqueue(async () => {
-      const user = this.data.users.find((item) => item.username === username);
-      if (!user) throw new StoreError('Fant ikke brukeren');
+      const user = this.data.users.find((item) => namesMatch(item.username, username));
+      if (!user) {
+        console.log('direct miss ' + JSON.stringify({ q: username }));
+        throw new StoreError('Fant ikke brukeren');
+      }
       if (user.id === fromId) throw new StoreError('Du kan ikke kontakte deg selv.');
       if (this.pairBlocked(fromId, user.id)) throw new StoreError('Du kan ikke kontakte denne brukeren.');
       if (this.directBetween(fromId, user.id)) throw new StoreError('Dere snakker allerede direkte.');
@@ -512,7 +529,7 @@ class JsonStore {
 
   directReply(userId, username, accept) {
     return this.enqueue(async () => {
-      const user = this.data.users.find((item) => item.username === username);
+      const user = this.data.users.find((item) => namesMatch(item.username, username));
       if (!user) throw new StoreError('Fant ikke brukeren');
       const incoming = this.data.directRequests.find((item) => item.toId === userId && item.fromId === user.id);
       const outgoing = this.data.directRequests.find((item) => item.fromId === userId && item.toId === user.id);
@@ -534,6 +551,36 @@ class JsonStore {
       this.save();
       return accept ? room : '';
     });
+  }
+
+  searchUsers(fromId, query) {
+    return this.enqueue(async () => {
+      const needle = String(query || '').trim().toLowerCase();
+      if (!needle) return [];
+      return this.data.users
+        .map((user) => ({ user, rank: rankContact(user, needle) }))
+        .filter((item) => item.rank < 4)
+        .sort((a, b) => a.rank - b.rank || String(a.user.username).localeCompare(String(b.user.username)))
+        .slice(0, 8)
+        .map((item) => ({
+          username: item.user.username,
+          name: item.user.displayName || '',
+          state: this.contactState(fromId, item.user.id)
+        }));
+    });
+  }
+
+  contactState(fromId, otherId) {
+    if (otherId === fromId) return 'self';
+    if (this.pairBlocked(fromId, otherId)) return 'blocked';
+    if (this.directBetween(fromId, otherId)) return 'contact';
+    const pending = this.data.directRequests.find((item) =>
+      (item.fromId === fromId && item.toId === otherId) ||
+      (item.fromId === otherId && item.toId === fromId)
+    );
+    if (pending && pending.fromId === fromId) return 'sent';
+    if (pending) return 'incoming';
+    return 'add';
   }
 
   directRequestsFor(userId) {
@@ -1172,7 +1219,10 @@ class PgStore {
   }
 
   async userByUsername(username) {
-    const result = await this.pool.query('SELECT id, username, display_name FROM users WHERE username = $1', [username]);
+    const result = await this.pool.query(
+      'SELECT id, username, display_name FROM users WHERE LOWER(TRIM(username)) = LOWER(TRIM($1))',
+      [username]
+    );
     const row = result.rows[0];
     if (!row) return null;
     return { id: row.id, username: row.username, displayName: row.display_name };
@@ -1244,7 +1294,10 @@ class PgStore {
 
   async directRequest(fromId, username) {
     const user = await this.userByUsername(username);
-    if (!user) throw new StoreError('Fant ikke brukeren');
+    if (!user) {
+      console.log('direct miss ' + JSON.stringify({ q: username }));
+      throw new StoreError('Fant ikke brukeren');
+    }
     if (user.id === fromId) throw new StoreError('Du kan ikke kontakte deg selv.');
     if (await this.pairBlocked(fromId, user.id)) throw new StoreError('Du kan ikke kontakte denne brukeren.');
     if (await this.directBetween(fromId, user.id)) throw new StoreError('Dere snakker allerede direkte.');
@@ -1302,6 +1355,55 @@ class PgStore {
     } finally {
       client.release();
     }
+  }
+
+  async searchUsers(fromId, query) {
+    const exact = String(query || '').trim().toLowerCase();
+    if (!exact) return [];
+    const like = '%' + exact.replace(/[\\%_]/g, (ch) => '\\' + ch) + '%';
+    const prefix = exact.replace(/[\\%_]/g, (ch) => '\\' + ch) + '%';
+    const result = await this.pool.query(
+      `SELECT u.username, u.display_name,
+         CASE
+           WHEN u.id = $1 THEN 'self'
+           WHEN EXISTS (
+             SELECT 1 FROM blocks b
+             WHERE (b.user_id = $1 AND b.blocked_id = u.id)
+                OR (b.user_id = u.id AND b.blocked_id = $1)
+           ) THEN 'blocked'
+           WHEN EXISTS (
+             SELECT 1 FROM groups g
+             WHERE g.direct = TRUE
+               AND EXISTS (SELECT 1 FROM members WHERE group_id = g.id AND user_id = $1)
+               AND EXISTS (SELECT 1 FROM members WHERE group_id = g.id AND user_id = u.id)
+           ) THEN 'contact'
+           WHEN EXISTS (
+             SELECT 1 FROM direct_requests r WHERE r.from_id = $1 AND r.to_id = u.id
+           ) THEN 'sent'
+           WHEN EXISTS (
+             SELECT 1 FROM direct_requests r WHERE r.to_id = $1 AND r.from_id = u.id
+           ) THEN 'incoming'
+           ELSE 'add'
+         END AS state
+       FROM users u
+       WHERE LOWER(TRIM(u.username)) LIKE $2 ESCAPE '\\'
+          OR LOWER(TRIM(u.display_name)) LIKE $2 ESCAPE '\\'
+       ORDER BY
+         CASE
+           WHEN LOWER(TRIM(u.username)) = $3 THEN 0
+           WHEN LOWER(TRIM(u.display_name)) = $3 THEN 1
+           WHEN LOWER(TRIM(u.username)) LIKE $4 ESCAPE '\\' THEN 2
+           ELSE 3
+         END,
+         u.username
+       LIMIT 8`,
+      [fromId, like, exact, prefix]
+    );
+    return result.rows.map((row) => ({
+      username: row.username,
+      name: row.display_name || '',
+      state: row.state
+    }));
   }
 
   async directRequestsFor(userId) {

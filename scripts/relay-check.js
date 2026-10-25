@@ -169,6 +169,30 @@ async function startServer() {
   const cara = await connect(server.url);
   signup(cara, 'cara', 'Cara', 'secret3');
   await waitFor(cara.inbox, (entry) => !entry.bin && entry.text.includes('"session"'));
+
+  const searchAt = ada.inbox.length;
+  send(ada, { t: 'searchUsers', username: '@Bob' });
+  const byHandle = jsonText(await waitFor(ada.inbox, (entry) => !entry.bin && entry.text.includes('"userSearch"'), 4000, searchAt));
+  if (byHandle.query !== '@Bob' && byHandle.query !== 'Bob') throw new Error('search query was not echoed ' + JSON.stringify(byHandle));
+  if (!byHandle.matches.some((item) => item.username === 'bob' && item.name === 'Sku' && item.state === 'add')) {
+    throw new Error('username search missed bob ' + JSON.stringify(byHandle));
+  }
+  const nameAt = ada.inbox.length;
+  send(ada, { t: 'searchUsers', username: '  Cara  ' });
+  const byName = jsonText(await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'userSearch' && (message.matches || []).some((item) => item.username === 'cara');
+    } catch { return false; }
+  }, 4000, nameAt));
+  if (!byName.matches.some((item) => item.username === 'cara' && item.name === 'Cara' && item.state === 'add')) {
+    throw new Error('display name search missed cara ' + JSON.stringify(byName));
+  }
+  const missAt = ada.inbox.length;
+  send(ada, { t: 'searchUsers', username: '@ingen-slik' });
+  const missed = jsonText(await waitFor(ada.inbox, (entry) => !entry.bin && entry.text.includes('Fant ikke brukeren'), 4000, missAt));
+  if (missed.t !== 'userSearch' || (missed.matches || []).length) throw new Error('missing user was found ' + JSON.stringify(missed));
   const caraMark = cara.inbox.length;
   ada.ws.send(frame);
   await new Promise((resolve) => setTimeout(resolve, 250));
@@ -302,7 +326,7 @@ async function startServer() {
   if (!String(selfDenied.error || '').includes('deg selv')) throw new Error('self direct was accepted');
 
   const askBob = bob.inbox.length;
-  send(ada, { t: 'direct', username: 'bob' });
+  send(ada, { t: 'direct', username: '@Bob' });
   const bobAsked = jsonText(await waitFor(bob.inbox, (entry) => {
     if (entry.bin) return false;
     try {

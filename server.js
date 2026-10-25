@@ -23,7 +23,17 @@ function normName(value) {
 }
 
 function normUser(value) {
-  return String(value || '').trim().toLowerCase().slice(0, 20);
+  return contactQuery(value).toLowerCase().slice(0, 20);
+}
+
+function contactQuery(value) {
+  return String(value || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .replace(/^@+/, '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, 40);
 }
 
 function validUser(username) {
@@ -403,6 +413,19 @@ async function logout(ws) {
   for (const room of previous) sendUsers(room);
 }
 
+async function searchUsers(ws, message) {
+  if (!requireUser(ws)) return;
+  const query = contactQuery(message.username || message.query || '');
+  if (!query) {
+    send(ws, { t: 'userSearch', query: '', matches: [], error: 'Skriv et brukernavn.' });
+    return;
+  }
+  const matches = await store.searchUsers(ws.user.id, query);
+  const error = matches.length ? '' : 'Fant ikke brukeren';
+  console.log('user search ' + JSON.stringify({ q: query, hits: matches.length }));
+  send(ws, { t: 'userSearch', query, matches, error });
+}
+
 async function directRequest(ws, message) {
   if (!requireUser(ws)) return;
   const username = normUser(message.username);
@@ -641,6 +664,7 @@ async function handleMessage(ws, message) {
   if (message.t === 'block') return blockUser(ws, message);
   if (message.t === 'unblock') return unblockUser(ws, message);
   if (message.t === 'report') return reportUser(ws, message);
+  if (message.t === 'searchUsers') return searchUsers(ws, message);
   if (message.t === 'direct') return directRequest(ws, message);
   if (message.t === 'directReply') return directReply(ws, message);
   if (message.t === 'removeDirect') return removeDirect(ws, message);

@@ -11,6 +11,7 @@ enum ServerEvent {
     case talkStarted(name: String, room: String, id: String)
     case talkStopped(name: String, room: String, id: String)
     case rejected(room: String, message: String)
+    case userSearch(query: String, matches: [UserMatch], error: String)
 }
 
 /// WebSocket client for the protocol in `server.js`.
@@ -140,6 +141,10 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
 
     func sendReport(username: String, room: String, reason: String) {
         sendEncodable(Command(t: "report", username: username, room: room, reason: reason))
+    }
+
+    func sendSearchUsers(username: String) {
+        sendEncodable(Command(t: "searchUsers", username: username))
     }
 
     func sendDirect(username: String) {
@@ -328,6 +333,12 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
         case "error":
             let messageText = message.error ?? "Noe gikk galt"
             return .rejected(room: message.room ?? "", message: messageText)
+        case "userSearch":
+            return .userSearch(
+                query: message.query ?? "",
+                matches: message.matches ?? [],
+                error: message.error ?? ""
+            )
         default:
             return nil
         }
@@ -405,9 +416,11 @@ private struct Inbound: Decodable {
     var requests: [WalkieRequest]?
     var blocked: [String]?
     var directs: [DirectRequest]?
+    var matches: [UserMatch]?
+    var query: String?
 
     enum CodingKeys: String, CodingKey {
-        case t, name, users, members, room, error, id, token, username, groups, invites, requests, blocked, directs
+        case t, name, users, members, room, error, id, token, username, groups, invites, requests, blocked, directs, matches, query
         case me = "self"
     }
 }

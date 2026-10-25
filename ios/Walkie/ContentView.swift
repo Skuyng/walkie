@@ -7,6 +7,10 @@ struct ContentView: View {
     @State private var darkMode = false
     @State private var savedBrightness: CGFloat?
     @State private var showMenu = false
+    @State private var listenToast = ""
+    @State private var showListenToast = false
+    @State private var showListenVolume = false
+    @State private var listenHide: Task<Void, Never>?
 
     var body: some View {
         ZStack {
@@ -44,7 +48,9 @@ struct ContentView: View {
         .onChange(of: session.name) { _, _ in session.savePreferences() }
         .onChange(of: session.room) { _, _ in session.savePreferences() }
         .onChange(of: session.serverURL) { _, _ in session.savePreferences() }
-        .onChange(of: session.speakerphone) { _, _ in session.saveSpeakerphone() }
+        .onChange(of: session.listenGain) { _, _ in
+            if showListenVolume { scheduleListenHide(volume: true) }
+        }
         .onChange(of: session.linkState) { _, _ in refreshVolumeButtons() }
         .onChange(of: session.hasConnectedOnce) { _, connected in
             if !connected { exitDarkMode() }
@@ -55,8 +61,10 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
                 session.endTransmitting()
+                session.setCaptureWarm(false)
                 session.releaseIdleVolumeSession()
             } else if phase == .active {
+                session.setCaptureWarm(true)
                 session.prepareVolumeHUD()
                 session.resumeAudioIfNeeded()
             }
@@ -98,7 +106,8 @@ struct ContentView: View {
                         TalkBottomBar(
                             session: session,
                             link: linkAction,
-                            onSpeaker: toggleSpeaker,
+                            onSpeaker: cycleListen,
+                            onSpeakerHold: revealListenVolume,
                             onDark: enterDarkMode,
                             onLink: linkTapped
                         )
@@ -110,6 +119,10 @@ struct ContentView: View {
                 }
             }
             .coordinateSpace(name: "talk")
+            .overlay(alignment: .bottom) {
+                listenChrome
+                    .padding(.bottom, 92)
+            }
             .overlayPreferenceValue(WaveAnchorKey.self) { rect in
                 WaveOverlay(
                     rect: rect,
@@ -169,8 +182,47 @@ struct ContentView: View {
         showMenu = true
     }
 
-    private func toggleSpeaker() {
-        session.speakerphone.toggle()
+    private var listenChrome: some View {
+        VStack(spacing: 8) {
+            if showListenVolume {
+                ListenVolumeBar(session: session)
+            }
+            if showListenToast && !listenToast.isEmpty {
+                Text(listenToast)
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .glassEffect(.regular, in: Capsule())
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func cycleListen() {
+        showListenVolume = false
+        session.cycleListenOutput()
+        listenToast = session.listenModeTitle
+        showListenToast = true
+        scheduleListenHide(volume: false)
+    }
+
+    private func revealListenVolume() {
+        showListenToast = false
+        showListenVolume = true
+        scheduleListenHide(volume: true)
+    }
+
+    private func scheduleListenHide(volume: Bool) {
+        listenHide?.cancel()
+        listenHide = Task {
+            try? await Task.sleep(for: .seconds(volume ? 2.4 : 1.3))
+            guard !Task.isCancelled else { return }
+            if volume {
+                showListenVolume = false
+            } else {
+                showListenToast = false
+            }
+        }
     }
 
     private func linkTapped() {
@@ -617,16 +669,18 @@ private struct TalkBottomBar: View {
     @ObservedObject var session: WalkieSession
     var link: HomeLink
     var onSpeaker: () -> Void
+    var onSpeakerHold: () -> Void
     var onDark: () -> Void
     var onLink: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            TalkIconButton(
-                systemImage: speakerIcon,
-                title: speakerTitle,
+            ListenModeButton(
+                systemImage: session.listenSymbol,
+                title: session.listenModeTitle,
                 tint: speakerTint,
-                action: onSpeaker
+                action: onSpeaker,
+                onLongPress: onSpeakerHold
             )
             TalkIconButton(systemImage: "moon.fill", title: session.t(.darkMode), tint: .primary, action: onDark)
             if link == .connect {
@@ -649,20 +703,15 @@ private struct TalkBottomBar: View {
         .accessibilityElement(children: .contain)
     }
 
-    private var speakerOn: Bool {
-        session.speakerphone
-    }
-
-    private var speakerIcon: String {
-        speakerOn ? "speaker.wave.3.fill" : "speaker.slash.fill"
-    }
-
     private var speakerTint: Color {
-        speakerOn ? .primary : .secondary
-    }
-
-    private var speakerTitle: String {
-        speakerOn ? session.t(.speakerOn) : session.t(.speakerOff)
+        switch session.listenOutput {
+        case .speaker:
+            return .primary
+        case .earpiece:
+            return Aurora.teal
+        case .mute:
+            return .secondary
+        }
     }
 
     private var linkIcon: String {
@@ -696,6 +745,67 @@ private struct TalkBottomBar: View {
         case .disconnect:
             return .red
         }
+    }
+}
+
+private struct ListenModeButton: View {
+    var systemImage: String
+    var title: String
+    var tint: Color
+    var action: () -> Void
+    var onLongPress: () -> Void
+    @State private var held = false
+
+    var body: some View {
+        Button(action: {
+            if held {
+                held = false
+                return
+            }
+            action()
+        }) {
+            Image(systemName: systemImage)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 48, height: 48)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.45).onEnded { _ in
+                held = true
+                onLongPress()
+            }
+        )
+    }
+}
+
+private struct ListenVolumeBar: View {
+    @ObservedObject var session: WalkieSession
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "speaker.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Slider(
+                value: Binding(
+                    get: { session.listenGain },
+                    set: { session.setListenGain($0) }
+                ),
+                in: 0...1
+            )
+            .tint(Aurora.teal)
+            Image(systemName: "speaker.wave.3.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 280)
+        .glassEffect(.regular, in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(session.t(.incomingVolume))
     }
 }
 
@@ -1274,12 +1384,20 @@ private struct DirectSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !session.contactNote.isEmpty {
+                Text(L10n.phrase(session.contactNote, session.language))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack(alignment: .center, spacing: 8) {
                 TextField(session.t(.username), text: $username)
                     .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.send)
-                    .onSubmit(send)
+                    .autocorrectionDisabled(true)
+                    .textContentType(nil)
+                    .writingToolsBehavior(.disabled)
+                    .submitLabel(.search)
+                    .onSubmit(search)
                     .glassFieldChrome()
                     .background {
                         GeometryReader { proxy in
@@ -1291,11 +1409,14 @@ private struct DirectSection: View {
                     prominent: false,
                     height: fieldHeight,
                     expands: false,
-                    action: send
+                    action: search
                 )
             }
             .onPreferenceChange(FieldHeightKey.self) { height in
                 if height > 0 { fieldHeight = height }
+            }
+            ForEach(session.userMatches) { match in
+                UserMatchRow(session: session, match: match)
             }
             ForEach(session.directRequests) { request in
                 DirectRequestRow(session: session, request: request)
@@ -1306,9 +1427,69 @@ private struct DirectSection: View {
         }
     }
 
-    private func send() {
-        let saved = session.requestDirect(username: username)
-        if saved { username = "" }
+    private func search() {
+        session.searchUsers(raw: username)
+    }
+}
+
+private struct UserMatchRow: View {
+    @ObservedObject var session: WalkieSession
+    let match: UserMatch
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+                if showsHandle {
+                    Text("@\(match.username)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 8)
+            if match.state == "add" {
+                Button(session.t(.addContact)) {
+                    session.addContact(username: match.username)
+                }
+                .buttonStyle(.glassProminent)
+                .tint(Aurora.teal)
+            } else {
+                Text(status)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .auroraCard()
+    }
+
+    private var title: String {
+        let trimmed = match.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "@\(match.username)" }
+        return trimmed
+    }
+
+    private var showsHandle: Bool {
+        !match.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var status: String {
+        switch match.state {
+        case "sent":
+            return L10n.phrase("Forespørselen er sendt.", session.language)
+        case "incoming":
+            return L10n.phrase("Du har en forespørsel. Godta den.", session.language)
+        case "contact":
+            return L10n.phrase("Dere snakker allerede direkte.", session.language)
+        case "blocked":
+            return L10n.phrase("Du kan ikke kontakte denne brukeren.", session.language)
+        case "self":
+            return L10n.phrase("Du kan ikke kontakte deg selv.", session.language)
+        default:
+            return ""
+        }
     }
 }
 

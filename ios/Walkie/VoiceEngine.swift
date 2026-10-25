@@ -20,17 +20,22 @@ enum VoiceEngineError: LocalizedError, Equatable {
     }
 }
 
-/// Plays incoming PCM16 for the whole connection, and opens the microphone only
-/// while Talk is held.
+/// Plays incoming PCM16 for the whole connection.
 ///
-/// Idle listening uses a playback engine. The input node is never tapped and
-/// voice processing stays off, so iOS does not show the microphone indicator.
-/// The built-in receiver is the one exception: with Høyttaler off and no
-/// headset, the session is `playAndRecord` for routing only, still with no tap
-/// and no voice processing. Holding Talk switches to `playAndRecord`, enables
-/// voice processing on the input node, installs the tap, then the ready chirp
-/// plays before any mic frames are sent. Releasing removes the tap, turns
-/// voice processing off, and returns to playback.
+/// While the app is in the foreground and a call is up, one `playAndRecord`
+/// graph stays running: voice processing is enabled once, the input tap stays
+/// installed, and the send gate stays closed until Talk. Pressing Talk only
+/// opens that gate, so the next mic buffer is encoded immediately. The ready
+/// chirp is scheduled on the beep player at the same time. Voice processing
+/// cancels it from the uplink; if voice processing is unavailable the chirp
+/// may leak, and sending still starts immediately.
+///
+/// Releasing Talk keeps the gate open for about 200 ms, then closes it.
+/// The graph is not rebuilt. Background idle tears the tap down, turns voice
+/// processing off, and switches to `.playback` so the microphone indicator
+/// is off and locked-screen playback still runs. Headset talk from the
+/// background pays for one capture start, then sends without waiting for
+/// the chirp.
 ///
 /// `playAndRecord` uses mode `.default`. `.voiceChat` quiets the loudspeaker.
 /// `allowBluetoothHFP` and `allowBluetoothA2DP` both stay available while
@@ -43,6 +48,9 @@ final class VoiceEngine {
     /// Category, mode, activation, or speaker override changed. Not used for
     /// opening or closing the microphone during talk.
     var onSessionReconfigured: (() -> Void)?
+    /// The send gate has closed after Talk, including the release tail.
+    /// Invoked on the main queue. A re-press during the tail does not call it.
+    var onSendIdle: (() -> Void)?
 
     private let log = Logger(subsystem: "com.skuyng.walkie", category: "audio")
     private let queue = DispatchQueue(label: "com.skuyng.walkie.audio", qos: .userInteractive)
@@ -79,17 +87,27 @@ final class VoiceEngine {
     private var chirpPlaying = false
     /// Set after voice processing fails once, so the next capture still opens the mic.
     private var voiceProcessingDisabled = false
-    /// True only while Talk holds a tapped input with voice processing.
+    /// True while the user is holding Talk. The release tail keeps the gate
+    /// open after this becomes false. The foreground graph stays up either way.
     private var wantsCapture = false
+    /// Foreground keeps the capture graph warm. Only a real background
+    /// transition clears it; the app switcher does not.
+    private var appIsActive = true
     private var captureArmed = false
     private var voiceProcessingOn = false
+    private var releaseTail: DispatchWorkItem?
+    private var releaseGeneration = 0
     private let incomingMuted = OSAllocatedUnfairLock(initialState: false)
+    /// Automatic leveler. Separate from the listener's volume slider.
     private var playbackGain: Float = 1
+    private let listenGain = OSAllocatedUnfairLock(initialState: Float(1))
     private var playingClip = false
     private var clipGeneration = 0
 
     private static let jitterSeconds = 0.14
     private static let jitterHold: TimeInterval = 0.15
+    /// Frames still sent after the finger lifts, so the last word is not cut.
+    private static let releaseTailSeconds: TimeInterval = 0.20
 
     private static let wireFormat: AVAudioFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -145,25 +163,49 @@ final class VoiceEngine {
         levelMeterLock.unlock()
     }
 
-    /// Opens the send gate when a capture graph is already up, or tears that
-    /// graph down. Arming the microphone is `prepareCapture`.
+    /// Opens the send gate immediately when Talk is held, or starts the release
+    /// tail when it is let go. Does not rebuild the audio graph.
     func setMicrophoneOpen(_ open: Bool) {
         if open {
-            openCaptureGate()
+            beginSending()
         } else {
-            endCapture()
+            endSending()
         }
     }
 
-    /// Switches the live engine to `playAndRecord` with voice processing and an
-    /// input tap. The send gate stays closed. `then` runs on the main queue.
-    func prepareCapture(then: @escaping (Bool) -> Void) {
+    /// Foreground: keep `playAndRecord`, voice processing, and the input tap,
+    /// with the send gate left as it is. Background: cool to playback once the
+    /// gate and the release tail are both idle.
+    func setCaptureWarm(_ active: Bool) {
+        let apply: () -> Void = { [weak self] in
+            self?.setCaptureWarmOnMain(active)
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
+    }
+
+    /// Arms the warm capture graph if needed, then opens the send gate on this
+    /// turn. Returns false when the call is down or the microphone cannot start.
+    @discardableResult
+    func beginSending() -> Bool {
+        if Thread.isMainThread {
+            return beginSendingOnMain()
+        }
+        var ready = false
+        DispatchQueue.main.sync {
+            ready = self.beginSendingOnMain()
+        }
+        return ready
+    }
+
+    /// Closes the send gate after a short tail so the last word still goes out.
+    /// The foreground graph stays up.
+    func endSending() {
         let run: () -> Void = { [weak self] in
-            guard let self else {
-                then(false)
-                return
-            }
-            then(self.prepareCaptureOnMain())
+            self?.endSendingOnMain()
         }
         if Thread.isMainThread {
             run()
@@ -172,30 +214,25 @@ final class VoiceEngine {
         }
     }
 
-    /// Stops sending, removes the tap, disables voice processing, and restores
-    /// playback when a call is still up.
-    func endCapture() {
-        let run: () -> Void = { [weak self] in
-            self?.endCaptureOnMain()
-        }
-        if Thread.isMainThread {
-            run()
-        } else {
-            DispatchQueue.main.async(execute: run)
-        }
+    /// Incoming speech only. 1 is full level after the slow leveler. 0 is silent.
+    func setListenGain(_ gain: Float) {
+        let clamped = min(1, max(0, gain))
+        listenGain.withLock { $0 = clamped }
     }
 
     func setSpeakerphone(_ enabled: Bool) {
         let apply: () -> Void = { [weak self] in
             guard let self else { return }
+            let changed = self.useSpeaker != enabled
             self.useSpeaker = enabled
-            let capturing = self.queue.sync { self.wantsCapture }
-            if capturing {
+            guard self.queue.sync(execute: { self.shouldRun }) else { return }
+            if !changed && self.warmGraphReady() { return }
+            let warm = self.appIsActive || self.warmGraphReady() || self.queue.sync { self.wantsCapture }
+            if warm {
                 self.applyOutputRoute(force: true)
-                self.ensureRunning()
+                self.restoreWarmGraphIfNeeded()
                 return
             }
-            guard self.queue.sync(execute: { self.shouldRun }) else { return }
             do {
                 try self.startListeningOnMain(force: true)
             } catch {
@@ -237,11 +274,57 @@ final class VoiceEngine {
     }
 
     func start() throws {
+        let reset: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.releaseGeneration += 1
+            self.releaseTail?.cancel()
+            self.releaseTail = nil
+            self.micOpen.withLock { $0 = false }
+            self.waveArmed.store(0)
+        }
+        if Thread.isMainThread {
+            reset()
+        } else {
+            DispatchQueue.main.sync(execute: reset)
+        }
         queue.sync { self.wantsCapture = false }
-        try startFresh(force: false)
+        if appIsActive {
+            do {
+                try startFresh(force: false)
+                return
+            } catch {
+                log.error("Warm microphone failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        if Thread.isMainThread {
+            try startListeningOnMain(force: true)
+        } else {
+            var thrown: Error?
+            DispatchQueue.main.sync {
+                do {
+                    try self.startListeningOnMain(force: true)
+                } catch {
+                    thrown = error
+                }
+            }
+            if let thrown { throw thrown }
+        }
     }
 
     func stop() {
+        let reset: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.releaseGeneration += 1
+            self.releaseTail?.cancel()
+            self.releaseTail = nil
+            self.micOpen.withLock { $0 = false }
+            self.waveArmed.store(0)
+        }
+        if Thread.isMainThread {
+            reset()
+        } else {
+            DispatchQueue.main.sync(execute: reset)
+        }
         queue.sync {
             shouldRun = false
             wantsCapture = false
@@ -304,9 +387,10 @@ final class VoiceEngine {
         }
     }
 
-    /// Local “you can speak” chirp. `then` runs on the main queue after it has
-    /// played, or immediately when the engine is not up. The mic gate stays
-    /// closed for the caller so the tone is not encoded.
+    /// Local “you can speak” chirp. It does not gate the microphone: the caller
+    /// opens the send gate first, and voice processing keeps the tone off the
+    /// uplink. `then` runs on the main queue after playback, or immediately
+    /// when the engine is not up.
     func playReadyChirp(then: @escaping () -> Void) {
         queue.async { [weak self] in
             guard let self else {
@@ -372,35 +456,91 @@ final class VoiceEngine {
     }
 
     private func startFreshOnMain(force: Bool) throws {
-        let capture = queue.sync { wantsCapture }
-        if capture {
+        if appIsActive {
             try startCaptureOnMain(force: force)
         } else {
             try startListeningOnMain(force: force)
         }
     }
 
-    private func prepareCaptureOnMain() -> Bool {
-        guard queue.sync(execute: { shouldRun }) else { return false }
-        let already = queue.sync { wantsCapture && captureArmed && tapInstalled && engine?.isRunning == true }
-        if already { return true }
-        queue.sync { self.wantsCapture = true }
+    private func setCaptureWarmOnMain(_ active: Bool) {
+        appIsActive = active
+        guard queue.sync(execute: { shouldRun }) else { return }
+        if active {
+            guard !warmGraphReady() else { return }
+            do {
+                try startCaptureOnMain(force: true)
+            } catch {
+                reportFailure(Self.failureAlert(for: error, fallback: .failedToStart))
+                try? startListeningOnMain(force: true)
+            }
+            return
+        }
+        let holding = micOpen.withLock { $0 } || releaseTail != nil
+        let wants = queue.sync { wantsCapture }
+        if holding || wants { return }
+        let listening = queue.sync { !captureArmed && engine?.isRunning == true }
+        if listening && listeningCategoryMatches() { return }
         do {
-            try startCaptureOnMain(force: true)
-            return true
+            try startListeningOnMain(force: true)
         } catch {
-            queue.sync { self.wantsCapture = false }
-            reportFailure(Self.failureAlert(for: error, fallback: .failedToStart))
-            try? startListeningOnMain(force: true)
-            return false
+            log.error("Background playback failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    private func endCaptureOnMain() {
+    private func beginSendingOnMain() -> Bool {
+        releaseGeneration += 1
+        releaseTail?.cancel()
+        releaseTail = nil
+        guard queue.sync(execute: { shouldRun }) else { return false }
+        queue.sync { self.wantsCapture = true }
+        if !warmGraphReady() {
+            do {
+                try startCaptureOnMain(force: true)
+            } catch {
+                queue.sync { self.wantsCapture = false }
+                reportFailure(Self.failureAlert(for: error, fallback: .failedToStart))
+                try? startListeningOnMain(force: true)
+                return false
+            }
+        }
+        openCaptureGate()
+        return micOpen.withLock { $0 }
+    }
+
+    private func endSendingOnMain() {
+        queue.sync { self.wantsCapture = false }
+        let open = micOpen.withLock { $0 }
+        guard open else {
+            finishReleaseTail()
+            return
+        }
+        releaseGeneration += 1
+        let generation = releaseGeneration
+        releaseTail?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.releaseGeneration == generation else { return }
+            self.finishReleaseTail()
+        }
+        releaseTail = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.releaseTailSeconds, execute: item)
+    }
+
+    /// Closes the gate and tells the session the uplink is idle. Cools to
+    /// playback only when the app is already in the background.
+    private func finishReleaseTail() {
+        let stillHolding = queue.sync { wantsCapture }
+        if stillHolding { return }
+        releaseTail = nil
         micOpen.withLock { $0 = false }
         waveArmed.store(0)
         currentLevelMeter()?.hideMic()
-        queue.sync { self.wantsCapture = false }
+        let notify = onSendIdle
+        let deliver: () -> Void = {
+            notify?()
+        }
+        DispatchQueue.main.async(execute: deliver)
+        guard appIsActive == false else { return }
         guard queue.sync(execute: { shouldRun }) else { return }
         let listening = queue.sync { !captureArmed && engine?.isRunning == true }
         if listening && listeningCategoryMatches() { return }
@@ -418,10 +558,29 @@ final class VoiceEngine {
         waveArmed.store(1)
     }
 
+    private func warmGraphReady() -> Bool {
+        let running = queue.sync {
+            shouldRun && captureArmed && tapInstalled && engine?.isRunning == true
+        }
+        return running && AVAudioSession.sharedInstance().category == .playAndRecord
+    }
+
+    /// Speaker and route changes can stop the engine. Rebuild capture without
+    /// clearing the send gate, so a hold that is already open keeps sending.
+    private func restoreWarmGraphIfNeeded() {
+        if warmGraphReady() { return }
+        guard queue.sync(execute: { shouldRun }) else { return }
+        do {
+            try startCaptureOnMain(force: true)
+        } catch {
+            reportFailure(Self.failureAlert(for: error, fallback: .failedToStart))
+        }
+    }
+
     private func startListeningOnMain(force: Bool) throws {
         if !force {
             let running = queue.sync {
-                shouldRun && !wantsCapture && !captureArmed && engine?.isRunning == true
+                shouldRun && !captureArmed && engine?.isRunning == true
             }
             if running && listeningCategoryMatches() {
                 engineOwnsSession = true
@@ -442,8 +601,10 @@ final class VoiceEngine {
     private func startCaptureOnMain(force: Bool) throws {
         try requireMicrophonePermission()
         if !force {
-            let running = queue.sync { shouldRun && wantsCapture && captureArmed && engine?.isRunning == true }
-            if running {
+            let running = queue.sync {
+                shouldRun && captureArmed && tapInstalled && engine?.isRunning == true
+            }
+            if running && AVAudioSession.sharedInstance().category == .playAndRecord {
                 engineOwnsSession = true
                 return
             }
@@ -541,31 +702,16 @@ final class VoiceEngine {
         }
     }
 
-    /// Playback unless Høyttaler is off and the only route is the built-in
-    /// receiver. That case stays `playAndRecord` so the earpiece can be
-    /// selected, without a tap or voice processing.
+    /// Background idle is playback only. No tap and no voice processing, and
+    /// `inputNode` is not touched, so the microphone indicator stays off.
     private func activateListeningSession() throws {
         let session = AVAudioSession.sharedInstance()
         reportSessionReconfigured()
-        if wantsBuiltInReceiver(session) {
-            try session.setCategory(
-                .playAndRecord,
-                mode: .default,
-                options: [.allowBluetoothHFP, .allowBluetoothA2DP]
-            )
-            try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
-        } else {
-            try session.setCategory(.playback, mode: .default, options: [])
-        }
+        try session.setCategory(.playback, mode: .default, options: [])
         engineOwnsSession = true
         try? session.setPreferredIOBufferDuration(0.04)
         try session.setActive(true)
-        if session.category == .playAndRecord {
-            try? session.overrideOutputAudioPort(.none)
-            lastOverride = .none
-        } else {
-            lastOverride = nil
-        }
+        lastOverride = nil
         reportSessionReconfigured()
     }
 
@@ -585,16 +731,8 @@ final class VoiceEngine {
         reportSessionReconfigured()
     }
 
-    private func wantsBuiltInReceiver(_ session: AVAudioSession) -> Bool {
-        guard !useSpeaker else { return false }
-        let external = session.currentRoute.outputs.contains { Self.externalPorts.contains($0.portType) }
-        return !external
-    }
-
     private func listeningCategoryMatches() -> Bool {
-        let session = AVAudioSession.sharedInstance()
-        if wantsBuiltInReceiver(session) { return session.category == .playAndRecord }
-        return session.category == .playback
+        AVAudioSession.sharedInstance().category == .playback
     }
 
     private func activateIdleSessionOnMain() {
@@ -1036,7 +1174,12 @@ final class VoiceEngine {
         guard let channels = buffer.floatChannelData else { return }
         let frames = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)
-        guard frames > 8, channelCount > 0 else { return }
+        guard frames > 0, channelCount > 0 else { return }
+        let user = listenGain.withLock { $0 }
+        guard frames > 8 else {
+            applyListenGain(channels, frames: frames, channelCount: channelCount, level: 1, user: user)
+            return
+        }
         let step = max(1, frames / 240)
         var sum: Float = 0
         var counted = 0
@@ -1054,8 +1197,19 @@ final class VoiceEngine {
         }
         let alpha: Float = desired > playbackGain ? 0.35 : 0.12
         playbackGain += (desired - playbackGain) * alpha
-        let gain = playbackGain
-        if abs(gain - 1) < 0.03 { return }
+        let level = playbackGain
+        applyListenGain(channels, frames: frames, channelCount: channelCount, level: level, user: user)
+    }
+
+    private func applyListenGain(
+        _ channels: UnsafePointer<UnsafeMutablePointer<Float>>,
+        frames: Int,
+        channelCount: Int,
+        level: Float,
+        user: Float
+    ) {
+        let gain = level * user
+        if abs(level - 1) < 0.03 && user > 0.995 { return }
         for channel in 0..<channelCount {
             let samples = channels[channel]
             for frame in 0..<frames {
@@ -1170,6 +1324,7 @@ final class VoiceEngine {
         let desired: AVAudioSession.PortOverride = (hasExternal || !useSpeaker) ? .none : .speaker
         var changed = false
         if outputOptionsNeedUpdate(session) {
+            reportSessionReconfigured()
             do {
                 try session.setCategory(.playAndRecord, mode: session.mode, options: categoryOptions())
                 changed = true
@@ -1193,9 +1348,10 @@ final class VoiceEngine {
         return changed
     }
 
+    /// A cold playback session is left alone. A warm `playAndRecord` graph
+    /// still picks up speaker and Bluetooth option changes while the gate is closed.
     private func outputOptionsNeedUpdate(_ session: AVAudioSession) -> Bool {
-        guard wantsCapture else { return false }
-        if session.category != .playAndRecord { return true }
+        guard session.category == .playAndRecord else { return false }
         let options = session.categoryOptions
         if options.contains(.allowBluetoothHFP) == false { return true }
         if options.contains(.allowBluetoothA2DP) == false { return true }
@@ -1240,12 +1396,21 @@ final class VoiceEngine {
     private func refreshRouteAfterChange() {
         let refresh: () -> Void = { [weak self] in
             guard let self else { return }
-            let capture = self.queue.sync { self.wantsCapture }
-            if capture {
-                self.applyOutputRoute()
+            guard self.queue.sync(execute: { self.shouldRun }) else { return }
+            let holding = self.micOpen.withLock { $0 } || self.releaseTail != nil
+            let wants = self.queue.sync { self.wantsCapture }
+            if self.appIsActive || holding || wants {
+                if self.warmGraphReady() {
+                    self.applyOutputRoute()
+                    return
+                }
+                do {
+                    try self.startCaptureOnMain(force: true)
+                } catch {
+                    self.log.error("Warm route rebuild failed: \(error.localizedDescription, privacy: .public)")
+                }
                 return
             }
-            guard self.queue.sync(execute: { self.shouldRun }) else { return }
             guard !self.listeningCategoryMatches() else { return }
             try? self.startListeningOnMain(force: true)
         }
