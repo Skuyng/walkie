@@ -408,34 +408,21 @@ private struct TalkButtonFace: View {
                 .fill(.clear)
                 .background(.ultraThinMaterial, in: Circle())
                 .glassEffect(.regular.tint(Color.white.opacity(0.12)), in: Circle())
+            Image(systemName: "mic.fill")
+                .font(.system(size: 52, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.2))
             TalkLevelFill(levels: levels, transmitting: transmitting, receiving: receiving)
                 .clipShape(Circle())
-            TalkButtonLabel(side: side)
+            Text("Talk")
+                .font(.title2.weight(.semibold))
+                .lineLimit(1)
+                .frame(width: side - 48, height: 30)
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.7), radius: 8, y: 1)
+                .offset(y: side * 0.28)
         }
         .frame(width: side, height: side)
         .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 1))
-    }
-}
-
-private struct TalkButtonLabel: View {
-    var side: CGFloat
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Image(systemName: "mic.fill")
-                .font(.system(size: 34, weight: .semibold))
-                .frame(width: 44, height: 44)
-            Spacer(minLength: 0)
-            Text("Talk")
-                .font(.title3.weight(.semibold))
-                .lineLimit(1)
-                .frame(width: side - 48, height: 28)
-        }
-        .padding(.top, side * 0.12)
-        .padding(.bottom, side * 0.14)
-        .frame(width: side, height: side)
-        .foregroundStyle(.white)
-        .shadow(color: .black.opacity(0.55), radius: 6, y: 1)
     }
 }
 

@@ -117,7 +117,7 @@ final class VoiceEngine {
         handlerLock.unlock()
     }
 
-    /// Latest mic and playback loudness. Written from the audio queue, read on main.
+    /// Live waveform history. Written from the audio queue, read on main.
     func attachLevelMeter(_ meter: LevelMeter) {
         levelMeterLock.lock()
         levelMeter = meter
@@ -131,7 +131,7 @@ final class VoiceEngine {
         micOpen.withLock { $0 = open }
         if !open {
             queue.async { [weak self] in
-                self?.currentLevelMeter()?.setMic(0)
+                self?.currentLevelMeter()?.clearMic()
             }
         }
     }
@@ -464,8 +464,8 @@ final class VoiceEngine {
             engine.inputNode.removeTap(onBus: 0)
         }
         tapInstalled = false
-        currentLevelMeter()?.setMic(0)
-        currentLevelMeter()?.setRemote(0)
+        currentLevelMeter()?.clearMic()
+        currentLevelMeter()?.clearRemote()
         engine?.stop()
         voicePlayer?.stop()
         beepPlayer?.stop()
@@ -489,7 +489,11 @@ final class VoiceEngine {
         queue.async { [weak self] in
             guard let self else { return }
             let open = self.micOpen.withLock { $0 }
-            self.currentLevelMeter()?.setMic(open ? Self.loudness(copy) : 0)
+            if open {
+                self.currentLevelMeter()?.appendMic(Self.wavePeaks(copy))
+            } else {
+                self.currentLevelMeter()?.clearMic()
+            }
             guard self.shouldRun, let data = self.encode(copy), !data.isEmpty else { return }
             self.handlerLock.lock()
             let handler = self.capture
@@ -505,28 +509,42 @@ final class VoiceEngine {
         return meter
     }
 
-    /// RMS plus peak, lifted so a normal voice moves the meter and silence stays low.
-    private static func loudness(_ buffer: AVAudioPCMBuffer) -> Float {
-        guard let channels = buffer.floatChannelData else { return 0 }
+    /// A few signed peaks from this buffer, so the trace follows the real waveform.
+    private static func wavePeaks(_ buffer: AVAudioPCMBuffer) -> [Float] {
+        guard let channels = buffer.floatChannelData else { return [] }
         let frames = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)
-        guard frames > 0, channelCount > 0 else { return 0 }
+        let rate = buffer.format.sampleRate
+        guard frames > 1, channelCount > 0, rate > 0 else { return [] }
         let used = min(channelCount, 2)
-        var sum: Float = 0
-        var peak: Float = 0
-        for channel in 0..<used {
-            let samples = channels[channel]
-            for index in 0..<frames {
-                let sample = samples[index]
-                guard sample.isFinite else { continue }
-                let magnitude = abs(sample)
-                if magnitude > peak { peak = magnitude }
-                sum += sample * sample
+        let duration = Double(frames) / rate
+        let buckets = max(2, min(16, Int(duration / 0.0035)))
+        let chunk = max(1, frames / buckets)
+        var peaks: [Float] = []
+        peaks.reserveCapacity(buckets)
+        var start = 0
+        while start < frames && peaks.count < buckets {
+            let end = min(frames, start + chunk)
+            var chosen: Float = 0
+            var chosenAbs: Float = 0
+            for index in start..<end {
+                var mixed: Float = 0
+                for channel in 0..<used {
+                    mixed += channels[channel][index]
+                }
+                mixed /= Float(used)
+                guard mixed.isFinite else { continue }
+                let magnitude = abs(mixed)
+                if magnitude >= chosenAbs {
+                    chosenAbs = magnitude
+                    chosen = mixed
+                }
             }
+            let boosted = chosen * 5.5
+            peaks.append(max(-1, min(1, boosted)))
+            start = end
         }
-        let rms = sqrt(sum / Float(frames * used))
-        let mixed = min(1, rms * 5.5 + peak * 0.22)
-        return pow(mixed, Float(0.55))
+        return peaks
     }
 
     private func encode(_ buffer: AVAudioPCMBuffer) -> Data? {
@@ -585,7 +603,7 @@ final class VoiceEngine {
         guard shouldRun, let decoder, let player = voicePlayer, let expected = playbackFormat else { return }
         let bytes = data.prefix(64_000)
         guard let wire = Self.wireBuffer(fromPCM16: bytes), let playback = decoder.convert(wire) else { return }
-        currentLevelMeter()?.setRemote(Self.loudness(wire))
+        currentLevelMeter()?.appendRemote(Self.wavePeaks(wire))
         guard abs(playback.format.sampleRate - expected.sampleRate) < 1,
               playback.format.channelCount == expected.channelCount else { return }
         let now = Date()

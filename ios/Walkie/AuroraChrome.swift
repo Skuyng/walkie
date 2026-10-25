@@ -154,132 +154,93 @@ private struct AuroraBlob: View {
     }
 }
 
-/// Thread-safe raw loudness. The audio queue writes; the main pump reads.
+/// Signed mic samples, oldest to newest. The audio queue writes; the button reads on main.
 final class LevelMeter: @unchecked Sendable {
+    static let length = 168
     private let lock = NSLock()
-    private var mic: Float = 0
-    private var remote: Float = 0
-    private var micAt = Date.distantPast
+    private var mic = [Float](repeating: 0, count: LevelMeter.length)
+    private var remote = [Float](repeating: 0, count: LevelMeter.length)
+    private var micWrite = 0
+    private var remoteWrite = 0
     private var remoteAt = Date.distantPast
 
-    func setMic(_ value: Float) {
+    func appendMic(_ samples: [Float]) {
         lock.lock()
-        mic = value
-        micAt = Date()
+        append(samples, into: &mic, write: &micWrite)
         lock.unlock()
     }
 
-    func setRemote(_ value: Float) {
+    func appendRemote(_ samples: [Float]) {
         lock.lock()
-        remote = value
+        append(samples, into: &remote, write: &remoteWrite)
         remoteAt = Date()
         lock.unlock()
     }
 
-    func sample() -> (mic: Float, remote: Float) {
+    func clearMic() {
         lock.lock()
-        let now = Date()
-        let micValue = now.timeIntervalSince(micAt) > 0.12 ? Float(0) : mic
-        let remoteValue = now.timeIntervalSince(remoteAt) > 0.22 ? Float(0) : remote
+        mic = [Float](repeating: 0, count: LevelMeter.length)
+        micWrite = 0
         lock.unlock()
-        return (micValue, remoteValue)
     }
-}
 
-/// Smoothed levels, published on the main thread at about 45 fps while audio is live.
-@MainActor
-final class AudioLevels: ObservableObject {
-    @Published private(set) var mic: Float = 0
-    @Published private(set) var remote: Float = 0
-    let meter = LevelMeter()
-    private(set) var micTrace = [Float](repeating: 0, count: Self.traceCount)
-    private(set) var remoteTrace = [Float](repeating: 0, count: Self.traceCount)
-    private var task: Task<Void, Never>?
-    private var micState: Float = 0
-    private var remoteState: Float = 0
-    private var micBeat = 0
-    private var remoteBeat = 0
+    func clearRemote() {
+        lock.lock()
+        remote = [Float](repeating: 0, count: LevelMeter.length)
+        remoteWrite = 0
+        remoteAt = .distantPast
+        lock.unlock()
+    }
 
-    /// One monitor beat: flat, small P, sharp QRS, T, then rest. About two beats a second.
-    private static let beat: [Float] = [
-        0, 0, 0.07, 0,
-        -0.22, 1, -0.5, 0,
-        0, 0.18, 0.22, 0.08,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-    ]
-    private static let traceCount = 96
+    func history(remoteWanted: Bool) -> [Float] {
+        lock.lock()
+        let stale = remoteWanted && Date().timeIntervalSince(remoteAt) > 0.22
+        let source = stale ? [Float](repeating: 0, count: LevelMeter.length) : (remoteWanted ? remote : mic)
+        let write = remoteWanted ? remoteWrite : micWrite
+        lock.unlock()
+        if stale { return source }
+        var ordered = [Float]()
+        ordered.reserveCapacity(source.count)
+        var index = write
+        for _ in 0..<source.count {
+            ordered.append(source[index])
+            index += 1
+            if index >= source.count { index = 0 }
+        }
+        return ordered
+    }
 
-    func start() {
-        guard task == nil else { return }
-        task = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let sample = self.meter.sample()
-                let micNext = Self.follow(self.micState, sample.mic)
-                let remoteNext = Self.follow(self.remoteState, sample.remote)
-                self.micState = micNext
-                self.remoteState = remoteNext
-                self.assignMic(micNext)
-                self.assignRemote(remoteNext)
-                let micSample = self.shaped(micNext, cursor: &self.micBeat, gain: 1)
-                let remoteSample = self.shaped(remoteNext, cursor: &self.remoteBeat, gain: 0.62)
-                self.push(&self.micTrace, micSample)
-                self.push(&self.remoteTrace, remoteSample)
-                try? await Task.sleep(for: .milliseconds(22))
-            }
+    private func append(_ samples: [Float], into wave: inout [Float], write: inout Int) {
+        for sample in samples {
+            wave[write] = sample
+            write += 1
+            if write >= wave.count { write = 0 }
         }
     }
-
-    /// Silence stays on the baseline. Voice prints a spike whose height follows the level.
-    private func shaped(_ level: Float, cursor: inout Int, gain: Float) -> Float {
-        let span = max(0, level - 0.2) / 0.8
-        let sample = Self.beat[cursor] * span * gain
-        cursor += 1
-        if cursor >= Self.beat.count { cursor = 0 }
-        return sample
-    }
-
-    private func push(_ trace: inout [Float], _ value: Float) {
-        if !trace.isEmpty { trace.removeFirst() }
-        trace.append(value)
-    }
-
-    private func assignMic(_ value: Float) {
-        let shown = value < 0.015 ? Float(0) : value
-        if abs(shown - mic) < 0.01 { return }
-        mic = shown
-    }
-
-    private func assignRemote(_ value: Float) {
-        let shown = value < 0.015 ? Float(0) : value
-        if abs(shown - remote) < 0.01 { return }
-        remote = shown
-    }
-
-    private static func follow(_ current: Float, _ target: Float) -> Float {
-        let rate: Float = target > current ? 0.62 : 0.34
-        return current + (target - current) * rate
-    }
 }
 
-/// One glowing trace across the middle of the button. Flat in silence, ECG spikes while someone speaks.
+/// Owns the live sample history. The trace reads it on the main thread.
+@MainActor
+final class AudioLevels: ObservableObject {
+    let meter = LevelMeter()
+}
+
+/// Live sample history across the middle of the button. Edges stay near the baseline.
 struct TalkLevelFill: View {
-    @ObservedObject var levels: AudioLevels
+    var levels: AudioLevels
     var transmitting: Bool
     var receiving: Bool
 
     var body: some View {
         TimelineView(.animation(minimumInterval: frameInterval)) { _ in
-            TalkLevelCanvas(samples: trace, bright: transmitting, subtler: receiving && !transmitting)
+            TalkLevelCanvas(
+                samples: levels.meter.history(remoteWanted: receiving && !transmitting),
+                live: transmitting || receiving,
+                subtler: receiving && !transmitting
+            )
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
-    }
-
-    private var trace: [Float] {
-        if transmitting { return levels.micTrace }
-        if receiving { return levels.remoteTrace }
-        return levels.micTrace
     }
 
     private var frameInterval: Double {
@@ -289,47 +250,78 @@ struct TalkLevelFill: View {
 
 private struct TalkLevelCanvas: View {
     var samples: [Float]
-    var bright: Bool
+    var live: Bool
     var subtler: Bool
 
     var body: some View {
         Canvas { context, size in
-            TalkLevelDraw.draw(context: &context, size: size, samples: samples, bright: bright, subtler: subtler)
+            TalkLevelDraw.draw(context: &context, size: size, samples: samples, live: live, subtler: subtler)
         }
     }
 }
 
 private enum TalkLevelDraw {
+    private static let teal = Color(red: 62.0 / 255.0, green: 230.0 / 255.0, blue: 208.0 / 255.0)
+
     static func draw(
         context: inout GraphicsContext,
         size: CGSize,
         samples: [Float],
-        bright: Bool,
+        live: Bool,
         subtler: Bool
     ) {
         guard size.width > 1, size.height > 1, samples.count > 1 else { return }
         context.clip(to: Path(ellipseIn: CGRect(origin: .zero, size: size)))
         let mid = size.height * 0.5
-        let topReserve = size.height * 0.12 + 48
-        let bottomReserve = size.height * 0.14 + 36
-        let reach = max(10, min(mid - topReserve, mid - bottomReserve))
-        var path = Path()
+        let reach = size.height * (subtler ? 0.22 : 0.36)
         let last = samples.count - 1
+        var points: [CGPoint] = []
+        var weight: [CGFloat] = []
+        points.reserveCapacity(samples.count)
+        weight.reserveCapacity(samples.count)
         for index in samples.indices {
-            let x = size.width * CGFloat(index) / CGFloat(last)
-            let y = mid - CGFloat(samples[index]) * reach
-            if index == 0 {
-                path.move(to: CGPoint(x: x, y: y))
-            } else {
-                path.addLine(to: CGPoint(x: x, y: y))
-            }
+            let across = CGFloat(index) / CGFloat(last)
+            let center = sin(across * .pi)
+            let window = 0.08 + 0.92 * center
+            let gain: CGFloat = subtler ? 0.58 : 1
+            let shaped = max(-1, min(1, CGFloat(samples[index]) * gain)) * window
+            let x = across * size.width
+            points.append(CGPoint(x: x, y: mid - shaped * reach))
+            weight.append(abs(shaped))
         }
-        let glow = subtler ? 0.28 : (bright ? 0.62 : 0.24)
-        let core = subtler ? 0.55 : (bright ? 1 : 0.45)
-        let wide = StrokeStyle(lineWidth: subtler ? 6 : 9, lineCap: .round, lineJoin: .round)
-        let thin = StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
-        context.stroke(path, with: .color(Aurora.green.opacity(glow)), style: wide)
-        context.stroke(path, with: .color(Aurora.teal.opacity(core)), style: thin)
+        var whole = Path()
+        whole.move(to: points[0])
+        for point in points.dropFirst() {
+            whole.addLine(to: point)
+        }
+        let glow = subtler ? 0.35 : (live ? 0.75 : 0.32)
+        context.drawLayer { layer in
+            layer.addFilter(.blur(radius: 7))
+            layer.stroke(
+                whole,
+                with: .color(teal.opacity(glow)),
+                style: StrokeStyle(lineWidth: 10, lineCap: .round, lineJoin: .round)
+            )
+        }
+        let style = StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round)
+        for index in 0..<last {
+            var segment = Path()
+            segment.move(to: points[index])
+            segment.addLine(to: points[index + 1])
+            let peak = max(weight[index], weight[index + 1])
+            context.stroke(segment, with: .color(color(for: peak, live: live)), style: style)
+        }
+    }
+
+    private static func color(for peak: CGFloat, live: Bool) -> Color {
+        if !live { return teal.opacity(0.5) }
+        if peak < 0.35 { return teal }
+        let mix = min(1, (peak - 0.35) / 0.65)
+        return Color(
+            red: (62.0 / 255.0) + (0.92 - 62.0 / 255.0) * mix,
+            green: (230.0 / 255.0) + (1 - 230.0 / 255.0) * mix,
+            blue: (208.0 / 255.0) + (0.97 - 208.0 / 255.0) * mix
+        )
     }
 }
 
