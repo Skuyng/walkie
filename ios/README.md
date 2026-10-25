@@ -52,7 +52,11 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Volum opp** — hold inne for å snakke, og slipp for å stoppe, mens appen er tilkoblet og i forgrunnen. Lydnivået settes tilbake etter at du slipper. Systemets volumvisning skjules i vanlig visning og i mørk modus.
 - **Høyttaler** — på som standard. På sender lyden i høyttaleren. Av bruker ørepluggen, med mindre hodetelefoner eller Bluetooth er koblet til. Valget lagres på telefonen.
 - **Mørk modus** — svart skjerm, lav lysstyrke, og telefonen holder seg våken. Et svakt rødt punkt vises mens du sender. Trykk skjermen for å avslutte. Volum opp virker her også.
-- Når noen andre begynner eller slutter å snakke, spilles en kort tone, og navnet vises.
+- Når noen andre begynner å snakke, spilles en kort tone, og navnet pulserer. Når de slipper, hører du en myk synkende tone.
+- **Siste melding** — den siste mottatte sendingen i kanalen ligger i minnet. En liten knapp nederst til høyre spiller den av igjen. Den sendes ikke videre.
+- **Ikke forstyrr** — i Innstillinger, med fra- og til-tid. Standard er 22:00–07:00, og bryteren er av til du slår den på. I tidsrommet er innkommende lyd dempet. Navnet vises likevel.
+- **Tilkobling** — en prikk og tekst vises når linjen er nede eller prøver igjen. Appen kobler til på nytt av seg selv, med lengre pause for hvert forsøk.
+- **Hodetelefoner** — avspillingsknappen veksler sending. Bluetooth-headset kan brukes både som samtale (HFP) og som avspilling (A2DP).
 
 ## Lyd og protokoll
 
@@ -80,7 +84,7 @@ Nettleseren plukker nærmeste sample når den nedsampler. iOS bruker `AVAudioCon
 
 ## Bakgrunn og låst skjerm
 
-`Info.plist` har `UIBackgroundModes` satt til `audio`. Det trengs for at tale skal kunne spilles av når skjermen er låst. Appen lagrer ikke opptak. Lydøkten er `playAndRecord` med modus `.default` (ikke `.voiceChat`, som demper høyttaleren). Bluetooth-headset bruker `allowBluetoothHFP`. A2DP brukes ikke, fordi det tar lyden vekk fra høyttaleren i en samtaleøkt. **Høyttaler** på legger til `defaultToSpeaker` og tvinger høyttaler etter at lyden er startet. Av lar lyden gå i ørepluggen når det ikke er et hodesett. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle, slik at innkommende tale kan fortsette når skjermen er låst.
+`Info.plist` har `UIBackgroundModes` satt til `audio`. Det trengs for at tale skal kunne spilles av når skjermen er låst. Appen lagrer ikke opptak. Siste melding ligger bare i minnet til appen lukkes eller du logger ut. Lydøkten er `playAndRecord` med modus `.default` (ikke `.voiceChat`, som demper høyttaleren). Motoren skrur på voice processing for ekkokansellering, støyreduksjon og automatisk nivå på mikrofonen. Avspilling jevnes ut i appen. Bluetooth tillater både `allowBluetoothHFP` og `allowBluetoothA2DP`. Et tilkoblet hodesett beholder ruten. **Høyttaler** på legger til `defaultToSpeaker` og tvinger høyttaler bare når ingen ekstern utgang er koblet til. Av lar lyden gå i ørepluggen når det ikke er et hodesett. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle, slik at innkommende tale kan fortsette når skjermen er låst.
 
 Den oransje mikrofonprikken lyser mens du er tilkoblet, fordi appen holder lydøkten i gang for å kunne ta imot tale i bakgrunnen. Du sender ikke lyd før du holder knappen inne, eller holder volum opp inne.
 

@@ -38,6 +38,7 @@ struct ContentView: View {
         .onDisappear {
             exitDarkMode()
             session.setVolumeButtonMonitoringEnabled(false)
+            session.setHeadsetTalkEnabled(false)
         }
         .onChange(of: session.name) { _, _ in session.savePreferences() }
         .onChange(of: session.room) { _, _ in session.savePreferences() }
@@ -269,6 +270,7 @@ struct ContentView: View {
         }
         let listen = scenePhase == .active && session.linkState == .connected
         session.setVolumeButtonMonitoringEnabled(listen)
+        session.setHeadsetTalkEnabled(session.linkState == .connected)
     }
 
     private var errorPresented: Binding<Bool> {
@@ -336,7 +338,7 @@ private struct TalkButton: View {
             .accessibilityElement(children: .ignore)
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel("Talk")
-            .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe. Hold volum opp inne for å snakke.")
+            .accessibilityHint("Hold inne for å snakke. Med VoiceOver aktiverer du for å starte og stoppe. Hold volum opp inne for å snakke. Hodetelefonens avspillingsknapp veksler sending.")
             .accessibilityAction {
                 if session.isTalking {
                     session.endTransmitting()
@@ -435,11 +437,7 @@ private struct HomePresence: View {
         ZStack {
             Text(" ")
             if !session.speakerLine.isEmpty {
-                Label(session.speakerLine, systemImage: "speaker.wave.2.fill")
-                    .labelStyle(.titleAndIcon)
-                    .symbolEffect(.variableColor.iterative)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                SpeakingName(text: session.speakerLine)
             }
         }
         .font(.system(.subheadline, design: .monospaced).weight(.medium))
@@ -450,26 +448,52 @@ private struct HomePresence: View {
     }
 
     private var faceRow: some View {
-        HStack(spacing: 8) {
-            if session.linkState == .connected && !members.isEmpty {
-                HStack(spacing: -8) {
-                    ForEach(shownMembers) { member in
-                        PresenceFace(member: member)
+        ZStack {
+            HStack(spacing: 8) {
+                if session.linkState == .connected && !members.isEmpty {
+                    HStack(spacing: -8) {
+                        ForEach(shownMembers) { member in
+                            PresenceFace(member: member)
+                        }
+                    }
+                    Text(countText)
+                        .font(.system(.caption, design: .monospaced).weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel(session.centerStatus)
+                } else {
+                    HStack(spacing: 6) {
+                        if showLinkDot {
+                            LinkDot(reconnecting: session.linkState != .disconnected)
+                        }
+                        Text(idleText)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                 }
-                Text(countText)
-                    .font(.system(.caption, design: .monospaced).weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel(session.centerStatus)
-            } else {
-                Text(idleText)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.trailing, session.heardClip(in: session.talkGroup) == nil ? 0 : 40)
+            if let clip = session.heardClip(in: session.talkGroup) {
+                HStack {
+                    Spacer(minLength: 0)
+                    ReplayButton(sender: clip.sender, at: clip.at) {
+                        session.replayLast(in: session.talkGroup)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity)
         .frame(height: 32)
+    }
+
+    private var showLinkDot: Bool {
+        switch session.linkState {
+        case .disconnected, .connecting, .reconnecting:
+            return true
+        case .connected, .signedIn:
+            return false
+        }
     }
 
     private var members: [OnlineMember] {
@@ -487,6 +511,71 @@ private struct HomePresence: View {
     private var idleText: String {
         if session.linkState == .connected { return "Ingen pålogget" }
         return session.statusText
+    }
+}
+
+private struct SpeakingName: View {
+    var text: String
+    @State private var dim = false
+
+    var body: some View {
+        Label(text, systemImage: "speaker.wave.2.fill")
+            .labelStyle(.titleAndIcon)
+            .symbolEffect(.variableColor.iterative)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .opacity(dim ? 0.55 : 1)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                    dim = true
+                }
+            }
+    }
+}
+
+private struct ReplayButton: View {
+    var sender: String
+    var at: Date
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.counterclockwise")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Aurora.teal)
+                .frame(width: 32, height: 32)
+                .background {
+                    Circle().fill(Color.white.opacity(0.14))
+                }
+                .overlay {
+                    Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Spill av siste melding fra \(sender), \(at.formatted(date: .omitted, time: .shortened))")
+    }
+}
+
+private struct LinkDot: View {
+    var reconnecting: Bool
+    @State private var dim = false
+
+    var body: some View {
+        Circle()
+            .fill(reconnecting ? Aurora.teal : Color.red)
+            .frame(width: 8, height: 8)
+            .opacity(reconnecting && dim ? 0.35 : 1)
+            .onAppear(perform: pulse)
+            .onChange(of: reconnecting) { _, _ in pulse() }
+            .accessibilityHidden(true)
+    }
+
+    private func pulse() {
+        dim = false
+        guard reconnecting else { return }
+        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+            dim = true
+        }
     }
 }
 
@@ -630,6 +719,9 @@ private struct HomeMenu: View {
                         SettingsBlock("Kontakter") {
                             DirectSection(session: session)
                         }
+                        SettingsBlock("Ikke forstyrr") {
+                            QuietHoursSection(session: session)
+                        }
                         SettingsBlock("Konto") {
                             VStack(alignment: .leading, spacing: 16) {
                                 accountHeader
@@ -697,6 +789,45 @@ private struct HomeMenu: View {
     private func logOut() {
         session.logOut()
         dismiss()
+    }
+}
+
+private struct QuietHoursSection: View {
+    @ObservedObject var session: WalkieSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Ikke forstyrr", isOn: enabled)
+                .font(.body.weight(.semibold))
+            DatePicker("Fra", selection: fromDate, displayedComponents: .hourAndMinute)
+                .font(.subheadline.weight(.semibold))
+            DatePicker("Til", selection: toDate, displayedComponents: .hourAndMinute)
+                .font(.subheadline.weight(.semibold))
+            Text("Slå på for å dempe innkommende lyd \(session.quietHoursLabel). Navnet vises fortsatt.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var enabled: Binding<Bool> {
+        Binding(
+            get: { session.quietHoursEnabled },
+            set: { session.setQuietHoursEnabled($0) }
+        )
+    }
+
+    private var fromDate: Binding<Date> {
+        Binding(
+            get: { WalkieSession.date(fromMinutes: session.quietFromMinutes) },
+            set: { session.setQuietFrom($0) }
+        )
+    }
+
+    private var toDate: Binding<Date> {
+        Binding(
+            get: { WalkieSession.date(fromMinutes: session.quietToMinutes) },
+            set: { session.setQuietTo($0) }
+        )
     }
 }
 

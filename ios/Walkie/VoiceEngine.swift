@@ -21,12 +21,12 @@ enum VoiceEngineError: LocalizedError, Equatable {
 
 /// Captures the microphone and plays incoming PCM16 while the session stays active.
 ///
-/// `playAndRecord` uses mode `.default`. `.voiceChat` applies heavy echo
-/// cancellation and automatic gain that quiet the loudspeaker, so it is not used.
-/// `allowBluetoothHFP` keeps a headset call route. A2DP is not requested:
-/// on a play-and-record session it pulls playback off the loudspeaker.
-/// Høyttaler adds `defaultToSpeaker` and a speaker override, applied again
-/// after the engine starts; off uses the receiver unless a headset is connected.
+/// `playAndRecord` uses mode `.default`. `.voiceChat` quiets the loudspeaker, so
+/// the session stays in `.default` and voice processing is enabled on the engine
+/// instead (echo cancellation, noise suppression, and capture AGC).
+/// `allowBluetoothHFP` and `allowBluetoothA2DP` both stay available. A connected
+/// headset keeps the route; Høyttaler adds `defaultToSpeaker` and a speaker
+/// override only when nothing external is plugged in.
 /// Incoming PCM stays 16 kHz and is converted to the hardware rate. The input tap stays
 /// installed for the whole connection so iOS treats the app as an active audio
 /// app when the phone is locked. Samples are only sent upstream while the
@@ -69,6 +69,12 @@ final class VoiceEngine {
     private var lastAudioAt = Date.distantPast
     /// True while the local ready chirp owns the beep player.
     private var chirpPlaying = false
+    /// Set after voice processing fails once, so the next start still opens the mic.
+    private var voiceProcessingDisabled = false
+    private let incomingMuted = OSAllocatedUnfairLock(initialState: false)
+    private var playbackGain: Float = 1
+    private var playingClip = false
+    private var clipGeneration = 0
 
     private static let jitterSeconds = 0.14
     private static let jitterHold: TimeInterval = 0.15
@@ -212,9 +218,37 @@ final class VoiceEngine {
         }
     }
 
+    /// Quiet hours. The capture tap and the speaking indicator are unchanged;
+    /// incoming buffers are not scheduled to the speaker.
+    func setIncomingMuted(_ muted: Bool) {
+        incomingMuted.withLock { $0 = muted }
+    }
+
+    /// Plays stored PCM16 through the current speaker route. It is not fed back
+    /// into the capture tap.
+    func playClip(_ data: Data) {
+        let copy = data
+        queue.async { [weak self] in
+            self?.playClipOnQueue(copy)
+        }
+    }
+
+    func stopPlaybackClip() {
+        queue.async { [weak self] in
+            self?.stopPlaybackClipOnQueue()
+        }
+    }
+
     func playTalkBoundaryBeep(isStart: Bool) {
         queue.async { [weak self] in
             self?.playBeepOnQueue(frequency: isStart ? 988 : 494)
+        }
+    }
+
+    /// Soft descending tone for listeners when a remote speaker releases.
+    func playRogerTone() {
+        queue.async { [weak self] in
+            self?.playRogerOnQueue()
         }
     }
 
@@ -312,12 +346,18 @@ final class VoiceEngine {
                 return
             } catch VoiceEngineError.noInput where attempt == 1 {
                 lastError = VoiceEngineError.noInput
+                voiceProcessingDisabled = true
                 log.error("Microphone format is 0; reactivating the session and retrying once")
                 releaseEngineAndSession()
             } catch {
                 lastError = error
                 log.error("Audio start failed: \(error.localizedDescription, privacy: .public)")
                 releaseEngineAndSession()
+                if attempt == 1, voiceProcessingDisabled == false {
+                    voiceProcessingDisabled = true
+                    log.error("Retrying audio without voice processing")
+                    continue
+                }
                 break
             }
         }
@@ -401,7 +441,7 @@ final class VoiceEngine {
     }
 
     private func categoryOptions() -> AVAudioSession.CategoryOptions {
-        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP]
+        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP, .allowBluetoothA2DP]
         if useSpeaker {
             options.insert(.defaultToSpeaker)
         }
@@ -439,6 +479,16 @@ final class VoiceEngine {
         self.primeBuffers.removeAll()
         self.primeTimer?.cancel()
         self.primeTimer = nil
+
+        if !voiceProcessingDisabled {
+            do {
+                try engine.setVoiceProcessingEnabled(true)
+                log.info("Voice processing on")
+            } catch {
+                voiceProcessingDisabled = true
+                log.error("Voice processing unavailable: \(error.localizedDescription, privacy: .public)")
+            }
+        }
 
         // Touch inputNode only after the session is playAndRecord and active.
         guard let inputFormat = tapFormat(for: engine) else {
@@ -519,6 +569,9 @@ final class VoiceEngine {
         jitterTimerArmed = false
         lastAudioAt = .distantPast
         chirpPlaying = false
+        playingClip = false
+        clipGeneration += 1
+        playbackGain = 1
     }
 
     private func handleInput(_ buffer: AVAudioPCMBuffer) {
@@ -600,6 +653,20 @@ final class VoiceEngine {
         currentLevelMeter()?.writeRemote(wire)
         guard abs(playback.format.sampleRate - expected.sampleRate) < 1,
               playback.format.channelCount == expected.channelCount else { return }
+        if incomingMuted.withLock({ $0 }) { return }
+        if playingClip {
+            clipGeneration += 1
+            playingClip = false
+            player.stop()
+            decoder.reset()
+            burstStarted = false
+            primeBuffers.removeAll()
+            primeTimer?.cancel()
+            primeTimer = nil
+            jitterTimerArmed = false
+            if !player.isPlaying { player.play() }
+        }
+        normalizePlayback(playback)
         let now = Date()
         if now.timeIntervalSince(lastAudioAt) > 0.25 {
             burstStarted = false
@@ -651,6 +718,134 @@ final class VoiceEngine {
         let options: AVAudioPlayerNodeBufferOptions = chirpPlaying ? [] : [.interrupts]
         player.scheduleBuffer(buffer, at: nil, options: options)
         if !player.isPlaying { player.play() }
+    }
+
+    private func playRogerOnQueue() {
+        guard shouldRun, let player = beepPlayer else { return }
+        let output = player.outputFormat(forBus: 0)
+        let format = output.sampleRate > 0 ? output : playbackFormat
+        guard let format, let buffer = makeRoger(format: format) else { return }
+        let options: AVAudioPlayerNodeBufferOptions = chirpPlaying ? [] : [.interrupts]
+        player.scheduleBuffer(buffer, at: nil, options: options)
+        if !player.isPlaying { player.play() }
+    }
+
+    /// One soft glide down, about 130 ms. Listeners hear it when talk ends.
+    private func makeRoger(format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let sampleRate = format.sampleRate
+        guard sampleRate > 0 else { return nil }
+        let duration = 0.13
+        let frames = AVAudioFrameCount(sampleRate * duration)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
+              let channels = buffer.floatChannelData else { return nil }
+        buffer.frameLength = frames
+        let count = Int(frames)
+        let channelCount = Int(format.channelCount)
+        var phase = 0.0
+        let startHz = 698.0
+        let endHz = 349.0
+        let fade = max(1, Int(sampleRate * 0.008))
+        for index in 0..<count {
+            let progress = Double(index) / Double(max(1, count - 1))
+            let frequency = startHz + (endHz - startHz) * progress
+            phase += 2 * Double.pi * frequency / sampleRate
+            var amplitude = 0.16 * sin(phase)
+            if index < fade { amplitude *= Double(index) / Double(fade) }
+            let remaining = count - index
+            if remaining < fade { amplitude *= Double(remaining) / Double(fade) }
+            let sample = Float(amplitude)
+            for channel in 0..<channelCount {
+                channels[channel][index] = sample
+            }
+        }
+        return buffer
+    }
+
+    private func playClipOnQueue(_ data: Data) {
+        guard shouldRun, let decoder, let player = voicePlayer else { return }
+        let pcm = data.prefix(45 * 32_000)
+        let total = pcm.count - (pcm.count % 2)
+        guard total >= 4 else { return }
+        decoder.reset()
+        clipGeneration += 1
+        let token = clipGeneration
+        playingClip = true
+        player.stop()
+        primeTimer?.cancel()
+        primeTimer = nil
+        primeBuffers.removeAll()
+        burstStarted = false
+        jitterTimerArmed = false
+        let chunkBytes = 16_000
+        var offset = 0
+        var scheduled = false
+        while offset < total {
+            let end = min(offset + chunkBytes, total)
+            let slice = pcm.subdata(in: offset..<end)
+            offset = end
+            guard let wire = Self.wireBuffer(fromPCM16: slice), let playback = decoder.convert(wire) else { continue }
+            normalizePlayback(playback)
+            if offset >= total {
+                player.scheduleBuffer(playback, at: nil, options: [], completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                    self?.queue.async {
+                        guard let self, self.clipGeneration == token else { return }
+                        self.playingClip = false
+                    }
+                }
+            } else {
+                player.scheduleBuffer(playback)
+            }
+            scheduled = true
+        }
+        if scheduled {
+            if !player.isPlaying { player.play() }
+        } else {
+            playingClip = false
+        }
+    }
+
+    private func stopPlaybackClipOnQueue() {
+        guard playingClip, let player = voicePlayer else { return }
+        clipGeneration += 1
+        playingClip = false
+        player.stop()
+        if !player.isPlaying { player.play() }
+    }
+
+    /// Slow leveler for playback only. The waveform still reads the raw wire buffer.
+    private func normalizePlayback(_ buffer: AVAudioPCMBuffer) {
+        guard let channels = buffer.floatChannelData else { return }
+        let frames = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard frames > 8, channelCount > 0 else { return }
+        let step = max(1, frames / 240)
+        var sum: Float = 0
+        var counted = 0
+        var index = 0
+        while index < frames {
+            let sample = channels[0][index]
+            sum += sample * sample
+            counted += 1
+            index += step
+        }
+        let rms = sqrt(sum / Float(max(1, counted)))
+        var desired: Float = 1
+        if rms >= 0.012 {
+            desired = min(3.5, max(0.5, 0.1 / rms))
+        }
+        let alpha: Float = desired > playbackGain ? 0.35 : 0.12
+        playbackGain += (desired - playbackGain) * alpha
+        let gain = playbackGain
+        if abs(gain - 1) < 0.03 { return }
+        for channel in 0..<channelCount {
+            let samples = channels[channel]
+            for frame in 0..<frames {
+                var sample = samples[frame] * gain
+                if sample > 0.98 { sample = 0.98 }
+                if sample < -0.98 { sample = -0.98 }
+                samples[frame] = sample
+            }
+        }
     }
 
     /// Two short rising tones, about 110 ms, at a moderate level.
@@ -783,6 +978,7 @@ final class VoiceEngine {
         if session.category != .playAndRecord { return true }
         let options = session.categoryOptions
         if options.contains(.allowBluetoothHFP) == false { return true }
+        if options.contains(.allowBluetoothA2DP) == false { return true }
         return options.contains(.defaultToSpeaker) != useSpeaker
     }
 

@@ -33,6 +33,10 @@ final class WalkieSession: ObservableObject {
     @Published private(set) var requests: [WalkieRequest] = []
     @Published private(set) var blockedUsernames: [String] = []
     @Published private(set) var directRequests: [DirectRequest] = []
+    @Published var quietHoursEnabled = false
+    @Published var quietFromMinutes = 22 * 60
+    @Published var quietToMinutes = 7 * 60
+    @Published private(set) var heardClips: [String: HeardClip] = [:]
 
     var canTransmit: Bool {
         linkState == .connected && audioReady
@@ -116,6 +120,7 @@ final class WalkieSession: ObservableObject {
     private let socket = WalkieSocket()
     private let transmitter = HoldToTalkTransmitter()
     private let volumeButtons = VolumeButtonMonitor()
+    private let headsetTalk = HeadsetTalkControl()
     private var activeURL: URL?
     private var shouldReconnect = false
     private var connectTask: Task<Void, Never>?
@@ -128,6 +133,11 @@ final class WalkieSession: ObservableObject {
     /// Bumps when talk ends so a late ready chirp does not open the mic.
     private var readyGeneration = 0
     private var preferTalk: String?
+    private var reconnectAttempt = 0
+    private var quietTimer: Timer?
+    private var openHeard: [String: OpenHeard] = [:]
+    private var heardAudio: [String: Data] = [:]
+    private var pendingHeard = Data()
 
     private enum PendingAuth {
         case signup(user: String, display: String, password: String)
@@ -151,7 +161,11 @@ final class WalkieSession: ObservableObject {
         serverURL = storedServer.isEmpty ? Self.defaultServerURL : storedServer
         accountUsername = defaults.string(forKey: Key.username) ?? ""
         speakerphone = defaults.object(forKey: Key.speakerphone) as? Bool ?? true
+        quietHoursEnabled = defaults.bool(forKey: Key.quietEnabled)
+        quietFromMinutes = Self.clampMinutes(defaults.object(forKey: Key.quietFrom) as? Int ?? (22 * 60))
+        quietToMinutes = Self.clampMinutes(defaults.object(forKey: Key.quietTo) as? Int ?? (7 * 60))
         engine.setSpeakerphone(speakerphone)
+        engine.setIncomingMuted(Self.quietHoursCover(enabled: quietHoursEnabled, from: quietFromMinutes, to: quietToMinutes, at: Date()))
         engine.attachLevelMeter(levels.wave)
         engine.activateForSystemVolume()
 
@@ -169,7 +183,12 @@ final class WalkieSession: ObservableObject {
             Task { @MainActor in self?.handle(event) }
         }
         socket.onAudio = { [weak self] data in
-            self?.engine.playIncoming(data)
+            guard let self else { return }
+            self.engine.playIncoming(data)
+            let captured = data
+            Task { @MainActor [weak self] in
+                self?.rememberIncoming(captured)
+            }
         }
         engine.setCaptureHandler { [weak self] data in
             self?.socket.send(audio: data)
@@ -204,6 +223,35 @@ final class WalkieSession: ObservableObject {
             openAccountSocket()
         }
         haptics.prepare()
+        startQuietClock()
+    }
+
+    func setQuietHoursEnabled(_ enabled: Bool) {
+        quietHoursEnabled = enabled
+        persistQuietHours()
+    }
+
+    func setQuietFrom(_ date: Date) {
+        quietFromMinutes = Self.clampMinutes(Self.minutes(from: date))
+        persistQuietHours()
+    }
+
+    func setQuietTo(_ date: Date) {
+        quietToMinutes = Self.clampMinutes(Self.minutes(from: date))
+        persistQuietHours()
+    }
+
+    var quietHoursLabel: String {
+        "\(Self.clock(quietFromMinutes))–\(Self.clock(quietToMinutes))"
+    }
+
+    func heardClip(in room: String) -> HeardClip? {
+        heardClips[room]
+    }
+
+    func replayLast(in room: String) {
+        guard let data = heardAudio[room], !data.isEmpty else { return }
+        engine.playClip(data)
     }
 
     func savePreferences() {
@@ -280,6 +328,7 @@ final class WalkieSession: ObservableObject {
         talkGroup = ""
         room = ""
         preferTalk = nil
+        clearHeard()
         saveGroups()
         if socketOpen {
             socket.sendLogout { [weak self] in
@@ -505,6 +554,9 @@ final class WalkieSession: ObservableObject {
         groups.removeAll { $0.id == id }
         membersByRoom[id] = nil
         joinProblems[id] = nil
+        openHeard[id] = nil
+        heardAudio[id] = nil
+        heardClips[id] = nil
         let leaving = talkers.filter { $0.room == id }
         for talker in leaving {
             removeTalker(id: talker.id, room: talker.room)
@@ -568,6 +620,7 @@ final class WalkieSession: ObservableObject {
         let sameServer = socketOpen && activeURL == url
         activeURL = url
         shouldReconnect = true
+        reconnectAttempt = 0
         dismissError()
         linkState = .connecting
         statusText = "Kobler til…"
@@ -581,6 +634,7 @@ final class WalkieSession: ObservableObject {
 
     func disconnect() {
         shouldReconnect = false
+        reconnectAttempt = 0
         connectTask?.cancel()
         reconnectTask?.cancel()
         setVolumeButtonMonitoringEnabled(false)
@@ -612,6 +666,19 @@ final class WalkieSession: ObservableObject {
         transmitter.beginTransmitting()
         if !was && transmitter.isTransmitting {
             haptics.pressTalk()
+            engine.stopPlaybackClip()
+        }
+    }
+
+    /// Play/pause on a headset toggles talk. Volume-up is unchanged.
+    func setHeadsetTalkEnabled(_ enabled: Bool) {
+        headsetTalk.setEnabled(enabled) { [weak self] in
+            guard let self else { return }
+            if self.transmitter.isTransmitting {
+                self.endTransmitting()
+            } else {
+                self.beginTransmitting()
+            }
         }
     }
 
@@ -732,6 +799,7 @@ final class WalkieSession: ObservableObject {
 
     private func failBeforeSession(_ message: String, settings: Bool) {
         shouldReconnect = false
+        reconnectAttempt = 0
         audioReady = false
         engine.stop()
         clearPresence()
@@ -756,11 +824,12 @@ final class WalkieSession: ObservableObject {
     private func handleClose() {
         socketOpen = false
         socketReady = false
+        finishAllHeardClips()
         let somebodyTalking = !talkers.isEmpty
         talkers.removeAll()
         membersByRoom = [:]
         selfID = ""
-        if somebodyTalking {
+        if somebodyTalking, !isQuietHours() {
             engine.playTalkBoundaryBeep(isStart: false)
         }
         engine.markTalkBurstEnded()
@@ -781,13 +850,21 @@ final class WalkieSession: ObservableObject {
 
     private func scheduleReconnect() {
         reconnectTask?.cancel()
+        let attempt = reconnectAttempt
+        reconnectAttempt = min(attempt + 1, 8)
+        let delay = Self.reconnectDelay(attempt)
         reconnectTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self, !Task.isCancelled, !self.socketOpen, let url = self.activeURL else { return }
             guard self.shouldReconnect || self.keepAccount else { return }
             self.statusText = self.signedIn ? "Kobler til…" : "Logger inn…"
             self.socket.connect(url: url)
         }
+    }
+
+    private static func reconnectDelay(_ attempt: Int) -> TimeInterval {
+        let steps: [TimeInterval] = [1, 2, 4, 8, 16, 30]
+        return steps[min(max(0, attempt), steps.count - 1)]
     }
 
     private func handle(_ event: ServerEvent) {
@@ -802,6 +879,7 @@ final class WalkieSession: ObservableObject {
             restoringSession = false
             keepAccount = true
             socketReady = true
+            reconnectAttempt = 0
             pendingAuth = nil
             if audioReady {
                 hasConnectedOnce = true
@@ -908,13 +986,141 @@ final class WalkieSession: ObservableObject {
         joinProblems = [:]
     }
 
+    private func startQuietClock() {
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.applyQuietHours()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        quietTimer = timer
+    }
+
+    private func applyQuietHours() {
+        engine.setIncomingMuted(isQuietHours())
+    }
+
+    private func isQuietHours(at date: Date = Date()) -> Bool {
+        Self.quietHoursCover(enabled: quietHoursEnabled, from: quietFromMinutes, to: quietToMinutes, at: date)
+    }
+
+    private func persistQuietHours() {
+        defaults.set(quietHoursEnabled, forKey: Key.quietEnabled)
+        defaults.set(quietFromMinutes, forKey: Key.quietFrom)
+        defaults.set(quietToMinutes, forKey: Key.quietTo)
+        applyQuietHours()
+    }
+
+    static func quietHoursCover(enabled: Bool, from: Int, to: Int, at date: Date) -> Bool {
+        guard enabled else { return false }
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+        let now = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+        if from == to { return false }
+        if from < to { return now >= from && now < to }
+        return now >= from || now < to
+    }
+
+    static func clock(_ minutes: Int) -> String {
+        let clamped = min(1439, max(0, minutes))
+        return String(format: "%02d:%02d", clamped / 60, clamped % 60)
+    }
+
+    static func minutes(from date: Date) -> Int {
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return clampMinutes((parts.hour ?? 0) * 60 + (parts.minute ?? 0))
+    }
+
+    static func clampMinutes(_ minutes: Int) -> Int {
+        min(1439, max(0, minutes))
+    }
+
+    static func date(fromMinutes minutes: Int) -> Date {
+        let clamped = min(1439, max(0, minutes))
+        var parts = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        parts.hour = clamped / 60
+        parts.minute = clamped % 60
+        parts.second = 0
+        return Calendar.current.date(from: parts) ?? Date()
+    }
+
+    private func rememberIncoming(_ data: Data) {
+        guard !data.isEmpty else { return }
+        var rooms: [String: [String]] = [:]
+        for talker in talkers {
+            if isLocalTalker(id: talker.id, name: talker.name) { continue }
+            guard !talker.room.isEmpty else { continue }
+            rooms[talker.room, default: []].append(talker.name)
+        }
+        if rooms.isEmpty {
+            Self.appendHeard(&pendingHeard, data, limit: Self.leadHeardBytes)
+            return
+        }
+        let lead = pendingHeard
+        if !lead.isEmpty {
+            pendingHeard.removeAll(keepingCapacity: true)
+        }
+        for (room, names) in rooms {
+            var open = openHeard[room] ?? OpenHeard()
+            if open.data.isEmpty, !lead.isEmpty {
+                Self.appendHeard(&open.data, lead, limit: Self.maxHeardBytes)
+            }
+            for name in names where !name.isEmpty && !open.names.contains(name) {
+                open.names.append(name)
+            }
+            Self.appendHeard(&open.data, data, limit: Self.maxHeardBytes)
+            openHeard[room] = open
+        }
+    }
+
+    private func remoteStillTalking(in room: String) -> Bool {
+        talkers.contains { $0.room == room && !isLocalTalker(id: $0.id, name: $0.name) }
+    }
+
+    private func finishHeardClip(_ room: String) {
+        guard let open = openHeard.removeValue(forKey: room) else { return }
+        guard open.data.count >= 3_200, !open.names.isEmpty else { return }
+        heardAudio[room] = open.data
+        heardClips[room] = HeardClip(sender: open.names.joined(separator: ", "), at: Date())
+    }
+
+    private func finishAllHeardClips() {
+        for room in Array(openHeard.keys) {
+            finishHeardClip(room)
+        }
+    }
+
+    private func clearHeard() {
+        openHeard.removeAll()
+        pendingHeard.removeAll()
+        heardAudio.removeAll()
+        heardClips = [:]
+    }
+
+    private static let maxHeardBytes = 45 * 32_000
+    private static let leadHeardBytes = 16_000
+
+    private static func appendHeard(_ buffer: inout Data, _ more: Data, limit: Int) {
+        buffer.append(more)
+        if buffer.count <= limit { return }
+        var drop = buffer.count - limit
+        if drop % 2 != 0 { drop += 1 }
+        if drop >= buffer.count {
+            buffer.removeAll(keepingCapacity: true)
+            return
+        }
+        buffer.removeFirst(drop)
+    }
+
     private func addTalker(id: String, name: String, room: String) {
         guard !room.isEmpty, !name.isEmpty else { return }
         let key = id.isEmpty ? name : id
         guard !talkers.contains(where: { $0.id == key && $0.room == room }) else { return }
         talkers.append(Talker(id: key, name: name, room: room))
-        engine.playTalkBoundaryBeep(isStart: true)
-        if !isLocalTalker(id: key, name: name) {
+        let local = isLocalTalker(id: key, name: name)
+        if local || !isQuietHours() {
+            engine.playTalkBoundaryBeep(isStart: true)
+        }
+        if !local {
             haptics.remoteStarted()
         }
     }
@@ -923,9 +1129,16 @@ final class WalkieSession: ObservableObject {
         guard let index = talkers.firstIndex(where: { $0.id == id && $0.room == room }) else { return }
         let local = isLocalTalker(id: id, name: "")
         talkers.remove(at: index)
-        engine.playTalkBoundaryBeep(isStart: false)
+        if local {
+            engine.playTalkBoundaryBeep(isStart: false)
+        } else if !isQuietHours() {
+            engine.playRogerTone()
+        }
         if !local {
             haptics.remoteStopped()
+        }
+        if !remoteStillTalking(in: room) {
+            finishHeardClip(room)
         }
         if talkers.isEmpty {
             engine.markTalkBurstEnded()
@@ -1066,6 +1279,9 @@ final class WalkieSession: ObservableObject {
         static let groups = "walkie.groups"
         static let talkGroup = "walkie.talkGroup"
         static let username = "walkie.username"
+        static let quietEnabled = "walkie.quiet.enabled"
+        static let quietFrom = "walkie.quiet.from"
+        static let quietTo = "walkie.quiet.to"
     }
 
     private static func normalizeUsername(_ raw: String) -> String {
@@ -1304,6 +1520,16 @@ struct WalkieGroup: Codable, Identifiable, Equatable {
 struct RoomMember: Codable, Equatable, Identifiable {
     var id: String
     var name: String
+}
+
+struct HeardClip: Equatable {
+    var sender: String
+    var at: Date
+}
+
+private struct OpenHeard {
+    var names: [String] = []
+    var data = Data()
 }
 
 struct Talker: Equatable, Identifiable {
