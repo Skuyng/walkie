@@ -8,9 +8,10 @@ struct ContentView: View {
     @FocusState private var focus: Field?
     @State private var darkMode = false
     @State private var savedBrightness: CGFloat?
+    @State private var showGroups = false
 
     private enum Field: Hashable {
-        case name, room, server
+        case name, server
     }
 
     var body: some View {
@@ -54,6 +55,9 @@ struct ContentView: View {
             syncDarkMode(with: phase)
             refreshVolumeButtons()
         }
+        .sheet(isPresented: $showGroups) {
+            GroupSheet(session: session)
+        }
         .alert(session.suggestsSettings ? "Mikrofon" : "Obs", isPresented: errorPresented) {
             Button("OK", role: .cancel) {}
             if session.suggestsSettings {
@@ -79,7 +83,7 @@ struct ContentView: View {
                             .glassEffect(.regular.tint(.red), in: Circle())
                         Text("Walkie")
                             .font(.largeTitle.weight(.bold))
-                        Text("Samme kanal som nettsiden.")
+                        Text("Opprett en gruppe, eller bli med på navnet.")
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity)
@@ -91,19 +95,11 @@ struct ContentView: View {
                             .textInputAutocapitalization(.words)
                             .submitLabel(.next)
                             .focused($focus, equals: .name)
-                            .onSubmit { focus = .room }
-                            .glassFieldChrome()
-                    }
-
-                    labeledField("Kanalkode") {
-                        TextField("Kanalkode (f.eks. familie)", text: $session.room)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .submitLabel(.next)
-                            .focused($focus, equals: .room)
                             .onSubmit { focus = .server }
                             .glassFieldChrome()
                     }
+
+                    GroupEditor(session: session)
 
                     labeledField("Server") {
                         TextField(WalkieSession.defaultServerURL, text: $session.serverURL)
@@ -153,11 +149,16 @@ struct ContentView: View {
             let side = min(geo.size.width - 48, max(200, geo.size.height - 360))
             GlassEffectContainer(spacing: 12) {
                 VStack(spacing: 16) {
-                    Label("Kanal: \(session.room)", systemImage: "dot.radiowaves.left.and.right")
+                    Label(talkCaption, systemImage: "dot.radiowaves.left.and.right")
                         .font(.headline)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                         .glassEffect(.regular, in: Capsule())
+
+                    ScrollView {
+                        GroupList(session: session)
+                    }
+                    .frame(maxHeight: 200)
 
                     Label(session.statusText, systemImage: statusSymbol)
                         .font(.subheadline.weight(.medium))
@@ -173,11 +174,6 @@ struct ContentView: View {
 
                     Spacer(minLength: 8)
 
-                    Label(session.usersLine, systemImage: "person.2.fill")
-                        .font(.body)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.secondary)
-
                     Label("Hold volum opp inne for å snakke", systemImage: "speaker.wave.2.fill")
                         .font(.footnote)
                         .multilineTextAlignment(.center)
@@ -190,6 +186,13 @@ struct ContentView: View {
                     speakerphoneToggle
 
                     HStack(spacing: 16) {
+                        Button {
+                            showGroups = true
+                        } label: {
+                            Label("Grupper", systemImage: "person.3.fill")
+                        }
+                        .buttonStyle(.glass)
+
                         Button(action: enterDarkMode) {
                             Label("Mørk modus", systemImage: "moon.fill")
                         }
@@ -277,6 +280,13 @@ struct ContentView: View {
             }
         }
         .sensoryFeedback(.impact(weight: .medium), trigger: session.isTalking)
+    }
+
+    private var talkCaption: String {
+        let match = session.groups.first { $0.id == session.talkGroup }
+        let label = match?.name ?? session.room
+        if label.isEmpty { return "Ingen gruppe" }
+        return "Snakker i: \(label)"
     }
 
     private var statusSymbol: String {
@@ -401,6 +411,196 @@ struct ContentView: View {
             get: { session.errorMessage != nil },
             set: { if !$0 { session.dismissError() } }
         )
+    }
+}
+
+private struct GroupSheet: View {
+    @ObservedObject var session: WalkieSession
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                GroupEditor(session: session)
+                    .padding(20)
+            }
+            .navigationTitle("Grupper")
+            .toolbar {
+                Button("Ferdig") { dismiss() }
+            }
+        }
+    }
+}
+
+private struct GroupEditor: View {
+    @ObservedObject var session: WalkieSession
+    @State private var draftName = ""
+    @State private var draftPassword = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Gruppe")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            TextField("Gruppenavn (f.eks. Familie)", text: $draftName)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+                .submitLabel(.done)
+                .glassFieldChrome()
+            SecureField("Passord (valgfritt)", text: $draftPassword)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textContentType(.password)
+                .glassFieldChrome()
+            HStack(spacing: 10) {
+                Button(action: createTapped) {
+                    Text("Opprett gruppe")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glassProminent)
+                .tint(.red)
+                Button(action: joinTapped) {
+                    Text("Bli med i gruppe")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glass)
+            }
+            GroupList(session: session)
+        }
+    }
+
+    private func createTapped() {
+        let saved = session.createGroup(named: draftName, password: draftPassword)
+        if saved {
+            draftName = ""
+            draftPassword = ""
+        }
+    }
+
+    private func joinTapped() {
+        let saved = session.joinGroup(named: draftName, password: draftPassword)
+        if saved {
+            draftName = ""
+            draftPassword = ""
+        }
+    }
+}
+
+private struct GroupList: View {
+    @ObservedObject var session: WalkieSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(session.groups) { group in
+                GroupRow(session: session, group: group)
+            }
+        }
+    }
+}
+
+private struct GroupRow: View {
+    @ObservedObject var session: WalkieSession
+    let group: WalkieGroup
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.headline)
+                Spacer(minLength: 8)
+                Button(talkTitle, action: select)
+                    .buttonStyle(.glass)
+                Button(role: .destructive, action: remove) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.glass)
+                .accessibilityLabel("Fjern \(group.name)")
+            }
+            Toggle("Lytt", isOn: listenBinding)
+            MemberList(session: session, groupID: group.id)
+            PresenceCaption(text: session.presenceCaption(for: group.id))
+        }
+        .padding(12)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var title: String {
+        group.locked ? "\(group.name) 🔒" : group.name
+    }
+
+    private var talkTitle: String {
+        session.talkGroup == group.id ? "Snakk" : "Velg"
+    }
+
+    private var listenBinding: Binding<Bool> {
+        Binding(
+            get: { group.listen },
+            set: { session.setListening(group.id, $0) }
+        )
+    }
+
+    private func select() {
+        session.selectTalk(group.id)
+    }
+
+    private func remove() {
+        session.removeGroup(group.id)
+    }
+}
+
+private struct MemberList: View {
+    @ObservedObject var session: WalkieSession
+    let groupID: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(session.onlineMembers(in: groupID)) { member in
+                MemberLine(member: member)
+            }
+        }
+    }
+}
+
+private struct PresenceCaption: View {
+    let text: String
+
+    var body: some View {
+        if text.isEmpty {
+            EmptyView()
+        } else {
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct MemberLine: View {
+    let member: OnlineMember
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color.green)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Text(label)
+                .font(nameFont)
+                .foregroundStyle(nameColor)
+        }
+    }
+
+    private var label: String {
+        member.talking ? "\(member.name) snakker" : member.name
+    }
+
+    private var nameFont: Font {
+        member.talking ? .body.weight(.bold) : .body
+    }
+
+    private var nameColor: Color {
+        member.talking ? .orange : .primary
     }
 }
 

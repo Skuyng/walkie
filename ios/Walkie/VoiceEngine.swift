@@ -21,9 +21,12 @@ enum VoiceEngineError: LocalizedError, Equatable {
 
 /// Captures the microphone and plays incoming PCM16 while the session stays active.
 ///
-/// `playAndRecord` + `allowBluetoothHFP` (the current name of `allowBluetooth`)
-/// keeps a call route. Høyttaler adds `defaultToSpeaker` and a speaker override;
-/// off uses the receiver unless a headset is connected. The input tap stays
+/// `playAndRecord` uses mode `.default`. `.voiceChat` applies heavy echo
+/// cancellation and automatic gain that quiet the loudspeaker, so it is not used.
+/// `allowBluetoothHFP` keeps a headset call route, and `allowBluetoothA2DP` is
+/// requested for higher-quality output. Høyttaler adds `defaultToSpeaker` and a
+/// speaker override; off uses the receiver unless a headset is connected.
+/// Incoming PCM stays 16 kHz and is converted to the hardware rate. The input tap stays
 /// installed for the whole connection so iOS treats the app as an active audio
 /// app when the phone is locked. Samples are only sent upstream while the
 /// microphone flag is open. Switching the speaker does not rebuild the engine.
@@ -58,6 +61,11 @@ final class VoiceEngine {
     private var burstStarted = false
     private var primeBuffers: [AVAudioPCMBuffer] = []
     private var primeTimer: DispatchWorkItem?
+    private var jitterTimerArmed = false
+    private var scheduledBuffers = 0
+
+    private static let jitterSeconds = 0.14
+    private static let jitterHold: TimeInterval = 0.15
 
     private static let wireFormat: AVAudioFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -198,14 +206,18 @@ final class VoiceEngine {
             guard let self else { return }
             self.primeTimer?.cancel()
             self.primeTimer = nil
+            self.jitterTimerArmed = false
             if !self.primeBuffers.isEmpty, let player = self.voicePlayer {
                 for buffer in self.primeBuffers {
-                    player.scheduleBuffer(buffer)
+                    self.schedulePlayback(buffer, on: player)
                 }
                 if !player.isPlaying { player.play() }
             }
             self.primeBuffers.removeAll()
             self.burstStarted = false
+            if self.scheduledBuffers == 0 {
+                self.decoder?.reset()
+            }
         }
     }
 
@@ -239,31 +251,27 @@ final class VoiceEngine {
         engineOwnsSession = true
 
         var lastError: Error = VoiceEngineError.failedToStart
-        var retriedZeroFormat = false
-        var modeIndex = 0
-        let voiceChatModes = [true, false]
-        while modeIndex < voiceChatModes.count {
-            let voiceChat = voiceChatModes[modeIndex]
-            modeIndex += 1
+        var attempt = 0
+        while attempt < 2 {
+            attempt += 1
             do {
                 queue.sync { self.tearDownEngineOnly() }
-                try activateSession(voiceChat: voiceChat, preferWireRate: !retriedZeroFormat)
+                try activateSession()
                 try queue.sync {
                     try self.buildAndStart()
                     self.shouldRun = true
                 }
-                log.info("Audio engine running voiceChat=\(voiceChat, privacy: .public)")
+                log.info("Audio engine running mode=default")
                 return
-            } catch VoiceEngineError.noInput where !retriedZeroFormat {
-                retriedZeroFormat = true
+            } catch VoiceEngineError.noInput where attempt == 1 {
                 lastError = VoiceEngineError.noInput
                 log.error("Microphone format is 0; reactivating the session and retrying once")
-                modeIndex -= 1
                 releaseEngineAndSession()
             } catch {
                 lastError = error
                 log.error("Audio start failed: \(error.localizedDescription, privacy: .public)")
                 releaseEngineAndSession()
+                break
             }
         }
         queue.sync { self.shouldRun = false }
@@ -317,17 +325,14 @@ final class VoiceEngine {
         return fallback
     }
 
-    private func activateSession(voiceChat: Bool, preferWireRate: Bool) throws {
+    private func activateSession() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
             .playAndRecord,
-            mode: voiceChat ? .voiceChat : .default,
+            mode: .default,
             options: categoryOptions()
         )
         engineOwnsSession = true
-        if preferWireRate {
-            try? session.setPreferredSampleRate(PCM16.sampleRate)
-        }
         try? session.setPreferredIOBufferDuration(0.04)
         try session.setActive(true)
         applyOutputRoute()
@@ -348,7 +353,7 @@ final class VoiceEngine {
     }
 
     private func categoryOptions() -> AVAudioSession.CategoryOptions {
-        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP]
+        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP, .allowBluetoothA2DP]
         if useSpeaker {
             options.insert(.defaultToSpeaker)
         }
@@ -396,6 +401,8 @@ final class VoiceEngine {
         }
         tapInstalled = true
 
+        engine.mainMixerNode.outputVolume = 1
+        voice.volume = 1
         engine.prepare()
         try engine.start()
 
@@ -454,6 +461,8 @@ final class VoiceEngine {
         primeTimer = nil
         primeBuffers.removeAll()
         burstStarted = false
+        jitterTimerArmed = false
+        scheduledBuffers = 0
     }
 
     private func handleInput(_ buffer: AVAudioPCMBuffer) {
@@ -479,9 +488,24 @@ final class VoiceEngine {
            converted.frameLength > 0 {
             let count = Int(converted.frameLength)
             let samples = Array(UnsafeBufferPointer(start: channel[0], count: count))
-            return PCM16.encode(samples)
+            return PCM16.encode(limitForWire(samples))
         }
         return encodeNearest(buffer)
+    }
+
+    /// Soft knee before the PCM16 clip, so loudspeaker peaks are not squared off.
+    private func limitForWire(_ samples: [Float]) -> [Float] {
+        let knee: Float = 0.7
+        let ceiling: Float = 0.98
+        let span = 1 - knee
+        return samples.map { sample in
+            guard sample.isFinite else { return 0 }
+            let sign: Float = sample < 0 ? -1 : 1
+            let magnitude = abs(sample)
+            if magnitude <= knee { return sample }
+            let compressed = knee + span * (1 - exp(-(magnitude - knee) / span))
+            return sign * min(ceiling, compressed)
+        }
     }
 
     /// Same point-sampling the browser uses, if `AVAudioConverter` cannot run.
@@ -502,7 +526,7 @@ final class VoiceEngine {
             }
             samples[index] = sum / Float(channelCount)
         }
-        return PCM16.encode(samples)
+        return PCM16.encode(limitForWire(samples))
     }
 
     private func playIncomingOnQueue(_ data: Data) {
@@ -512,35 +536,58 @@ final class VoiceEngine {
         guard abs(playback.format.sampleRate - expected.sampleRate) < 1,
               playback.format.channelCount == expected.channelCount else { return }
         if burstStarted {
-            player.scheduleBuffer(playback)
-            if !player.isPlaying { player.play() }
+            schedulePlayback(playback, on: player)
             return
         }
         primeBuffers.append(playback)
         let frames = primeBuffers.reduce(0) { $0 + Int($1.frameLength) }
         let seconds = Double(frames) / playback.format.sampleRate
-        if seconds >= 0.10 {
+        if seconds >= Self.jitterSeconds {
             beginBurstOnQueue()
-        } else {
-            primeTimer?.cancel()
+        } else if !jitterTimerArmed {
+            jitterTimerArmed = true
             let item = DispatchWorkItem { [weak self] in
                 self?.beginBurstOnQueue()
             }
             primeTimer = item
-            queue.asyncAfter(deadline: .now() + 0.07, execute: item)
+            queue.asyncAfter(deadline: .now() + Self.jitterHold, execute: item)
         }
     }
 
     private func beginBurstOnQueue() {
         primeTimer?.cancel()
         primeTimer = nil
+        jitterTimerArmed = false
         guard !primeBuffers.isEmpty, let player = voicePlayer else { return }
         burstStarted = true
         for buffer in primeBuffers {
-            player.scheduleBuffer(buffer)
+            schedulePlayback(buffer, on: player)
         }
         primeBuffers.removeAll()
         if !player.isPlaying { player.play() }
+    }
+
+    private func schedulePlayback(_ buffer: AVAudioPCMBuffer, on player: AVAudioPlayerNode) {
+        scheduledBuffers += 1
+        let completion: (AVAudioPlayerNodeCompletionCallbackType) -> Void = { [weak self] _ in
+            guard let self else { return }
+            let hop: () -> Void = {
+                self.notePlaybackFinished()
+            }
+            self.queue.async(execute: hop)
+        }
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack, completionHandler: completion)
+        if !player.isPlaying { player.play() }
+    }
+
+    private func notePlaybackFinished() {
+        scheduledBuffers = max(0, scheduledBuffers - 1)
+        let idle = scheduledBuffers == 0 && primeBuffers.isEmpty
+        if idle {
+            burstStarted = false
+            decoder?.reset()
+            jitterTimerArmed = false
+        }
     }
 
     private func playBeepOnQueue(frequency: Double) {
@@ -639,6 +686,7 @@ final class VoiceEngine {
         if session.category != .playAndRecord { return true }
         let options = session.categoryOptions
         if options.contains(.allowBluetoothHFP) == false { return true }
+        if options.contains(.allowBluetoothA2DP) == false { return true }
         return options.contains(.defaultToSpeaker) != useSpeaker
     }
 
@@ -732,5 +780,9 @@ private final class FormatConverter {
             return nil
         }
         return output
+    }
+
+    func reset() {
+        converter.reset()
     }
 }

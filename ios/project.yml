@@ -28,6 +28,7 @@ targets:
     deploymentTarget: "26.0"
     dependencies:
       - sdk: MediaPlayer.framework
+      - sdk: Security.framework
     sources:
       - path: Walkie
         excludes:

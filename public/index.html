@@ -2,34 +2,147 @@
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Walkie"><link rel="manifest" href="/manifest.json"><link rel="apple-touch-icon" href="/icon.png">
 <title>Walkie-Talkie</title><style>
 body{margin:0;font-family:-apple-system,sans-serif;background:#111;color:#eee;text-align:center;-webkit-user-select:none;user-select:none}
-input,button{font-size:20px;padding:12px;border-radius:10px;border:0;margin:6px;width:80%}
-#ptt{width:240px;height:240px;border-radius:50%;background:#c22;color:#fff;font-size:28px;margin:30px auto;display:block;-webkit-touch-callout:none;touch-action:none}
-#ptt.on{background:#2c2}#who{font-size:22px;min-height:30px;color:#fc0}#chat{display:none}
+input,button{font-size:18px;padding:12px;border-radius:10px;border:0;margin:6px;width:80%}
+.row{display:flex;gap:8px;justify-content:center;width:86%;margin:0 auto}
+.row button{width:auto;flex:1}
+#ptt{width:220px;height:220px;border-radius:50%;background:#c22;color:#fff;font-size:26px;margin:24px auto;display:block;-webkit-touch-callout:none;touch-action:none}
+#ptt.on{background:#2c2}#who{font-size:20px;min-height:28px;color:#fc0}#chat{display:none}
+.group{text-align:left;background:#1c1c1c;border-radius:12px;padding:10px 12px;margin:8px auto;width:86%}
+.group h3{margin:0 0 6px;font-size:18px}
+.person{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:16px}
+.dot{width:8px;height:8px;border-radius:50%;background:#3d3;display:inline-block}
+.person.talk{color:#fc0;font-weight:700}
+.tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:15px}
+.tools button{width:auto;margin:0;padding:8px 10px}
+label.chk{display:flex;align-items:center;gap:6px}
 </style></head><body>
-<div id="login"><h1>📻 Walkie-Talkie</h1><input id="name" placeholder="Ditt navn"><input id="room" placeholder="Kanalkode (f.eks. familie)"><button id="go">Koble til</button></div>
-<div id="chat"><h2 id="title"></h2><div id="status">Kobler til…</div><button id="ptt">Hold for å snakke</button><div id="who"></div><p id="users"></p></div>
+<div id="login"><h1>📻 Walkie-Talkie</h1>
+<input id="name" placeholder="Ditt navn">
+<input id="gname" placeholder="Gruppenavn (f.eks. Familie)">
+<input id="gpass" type="password" placeholder="Passord (valgfritt)">
+<div class="row"><button id="create" type="button">Opprett gruppe</button><button id="enter" type="button">Bli med i gruppe</button></div>
+<div id="localGroups"></div>
+<button id="go">Koble til</button></div>
+<div id="chat"><div id="status">Kobler til…</div><div id="liveGroups"></div><button id="ptt">Hold for å snakke</button><div id="who"></div></div>
 <script>
-const $=id=>document.getElementById(id);$('name').value=localStorage.n||'';$('room').value=localStorage.r||'';
-let ws,ctx,stream,proc,src,talking=false,playT=0,speakers=new Set();const RATE=16000;
-$('go').onclick=async()=>{const n=$('name').value.trim(),r=$('room').value.trim();if(!n||!r)return alert('Skriv navn og kanal');
-localStorage.n=n;localStorage.r=r;ctx=new (window.AudioContext||window.webkitAudioContext)();await ctx.resume();
-try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}})}catch(e){return alert('Fikk ikke tilgang til mikrofonen. Tillat mikrofon i Safari.')}
-src=ctx.createMediaStreamSource(stream);proc=ctx.createScriptProcessor(4096,1,1);const mute=ctx.createGain();mute.gain.value=0;
-src.connect(proc);proc.connect(mute);mute.connect(ctx.destination);
-proc.onaudioprocess=e=>{if(!talking||!ws||ws.readyState!==1)return;const i=e.inputBuffer.getChannelData(0),ratio=ctx.sampleRate/RATE,len=Math.floor(i.length/ratio),o=new Int16Array(len);
-for(let k=0;k<len;k++){const s=Math.max(-1,Math.min(1,i[Math.floor(k*ratio)]));o[k]=s*32767}ws.send(o.buffer)};
-$('login').style.display='none';$('chat').style.display='block';$('title').textContent='Kanal: '+r;connect(n,r)};
-function connect(n,r){ws=new WebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host);ws.binaryType='arraybuffer';
-ws.onopen=()=>{$('status').textContent='🟢 Tilkoblet';ws.send(JSON.stringify({t:'join',name:n,room:r}))};
-ws.onclose=()=>{$('status').textContent='🔴 Frakoblet – prøver igjen…';setTimeout(()=>connect(n,r),2000)};
-ws.onmessage=e=>{if(typeof e.data!=='string')return play(e.data);const m=JSON.parse(e.data);
-if(m.t=='users')$('users').textContent='I kanalen: '+m.users.join(', ');
-if(m.t=='start')speakers.add(m.name);if(m.t=='stop')speakers.delete(m.name);
-$('who').textContent=speakers.size?'🔊 '+[...speakers].join(', ')+' snakker':''}}
+const $=id=>document.getElementById(id);
+const RATE=16000;
+let groups=loadGroups();
+let passwords=loadPass('gpw');
+let talk=localStorage.talk||'';
+let members={};
+let speakers={};
+let ws,ctx,stream,proc,src,talking=false,playT=0,myName='';
+$('name').value=localStorage.n||'';
+function loadGroups(){try{const v=JSON.parse(localStorage.groups||'[]');return Array.isArray(v)?v:[]}catch{return[]}}
+function loadPass(key){try{const v=JSON.parse(localStorage[key]||'{}');return v&&typeof v==='object'?v:{}}catch{return{}}}
+function saveLocal(){localStorage.groups=JSON.stringify(groups);localStorage.gpw=JSON.stringify(passwords);localStorage.talk=talk}
+function roomId(value){return String(value||'').trim().toLowerCase().slice(0,40)}
+function clipName(value){return String(value||'').trim().slice(0,40)}
+function upsert(name,password,create){
+  const label=clipName(name);const id=roomId(label);
+  if(!id)return alert('Skriv et gruppenavn');
+  const secret=String(password||'').slice(0,80);
+  let found=groups.find(g=>g.id===id);
+  if(!found){found={id,name:label,listen:true,setsPassword:false};groups.push(found)}
+  else found.name=label;
+  found.listen=true;
+  if(secret){passwords[id]=secret;found.setsPassword=create||found.setsPassword}
+  else if(create) found.setsPassword=false;
+  if(!talk)talk=id;
+  if(create)talk=id;
+  saveLocal();render();
+  if(ws&&ws.readyState===1)sendState();
+}
+function render(){
+  $('localGroups').innerHTML=groups.map(drawGroup).join('')||'<p>Ingen grupper ennå.</p>';
+  if($('liveGroups'))$('liveGroups').innerHTML=groups.map(drawGroup).join('');
+  document.querySelectorAll('[data-act]').forEach(el=>el.onclick=onTool);
+}
+function namesFor(g){
+  const list=(members[g.id]||[]).slice();
+  Object.keys(speakers[g.id]||{}).forEach(name=>{if(list.indexOf(name)<0)list.push(name)});
+  if(talking&&g.id===talk&&myName&&list.indexOf(myName)<0)list.push(myName);
+  return list;
+}
+function drawGroup(g){
+  const online=ws&&ws.readyState===1;
+  const people=!online?'':namesFor(g).map(name=>{
+    const hot=(speakers[g.id]&&speakers[g.id][name])||(talking&&g.id===talk&&name===myName);
+    return '<div class="person'+(hot?' talk':'')+'"><span class="dot"></span>'+escapeHtml(name)+(hot?' snakker':'')+'</div>';
+  }).join('')||'<div class="person">Ingen pålogget</div>';
+  const mic=g.id===talk?'Snakk':'Velg';
+  return '<div class="group"><h3>'+escapeHtml(g.name)+(passwords[g.id]?' 🔒':'')+'</h3><div class="tools"><button data-act="talk" data-id="'+g.id+'">'+mic+'</button><label class="chk"><input data-act="listen" data-id="'+g.id+'" type="checkbox"'+(g.listen?' checked':'')+'> Lytt</label><button data-act="drop" data-id="'+g.id+'">Fjern</button></div>'+people+'</div>';
+}
+function escapeHtml(value){return String(value).replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]))}
+function onTool(e){
+  const id=e.currentTarget.getAttribute('data-id');
+  const act=e.currentTarget.getAttribute('data-act');
+  const group=groups.find(g=>g.id===id);if(!group)return;
+  if(act==='talk')talk=id;
+  if(act==='listen')group.listen=e.currentTarget.checked;
+  if(act==='drop'){groups=groups.filter(g=>g.id!==id);delete passwords[id];if(talk===id)talk=groups[0]?groups[0].id:'';}
+  saveLocal();render();
+  if(ws&&ws.readyState===1)sendState();
+}
+function payload(){
+  return {t:'groups',name:myName,talk,groups:groups.map(g=>({room:g.id,password:passwords[g.id]||'',create:!!g.setsPassword,listen:!!g.listen}))};
+}
+function sendState(){
+  if(!ws||ws.readyState!==1)return;
+  ws.send(JSON.stringify(payload()));
+  if(talk)ws.send(JSON.stringify({t:'join',name:myName,room:talk,password:passwords[talk]||''}));
+}
+function whoText(){
+  const lines=[];
+  Object.keys(speakers).forEach(room=>{
+    const names=Object.keys(speakers[room]||{});
+    if(!names.length)return;
+    const label=(groups.find(g=>g.id===room)||{name:room}).name;
+    lines.push(names.join(', ')+' i '+label);
+  });
+  $('who').textContent=lines.length?lines.join(' · ')+' snakker':'';
+}
+$('create').onclick=()=>upsert($('gname').value,$('gpass').value,true);
+$('enter').onclick=()=>upsert($('gname').value,$('gpass').value,false);
+render();
+$('go').onclick=async()=>{
+  myName=$('name').value.trim().slice(0,30);
+  if(!myName)return alert('Skriv inn navn');
+  if(!groups.length||!talk)return alert('Opprett eller bli med i en gruppe');
+  localStorage.n=myName;saveLocal();
+  ctx=new (window.AudioContext||window.webkitAudioContext)();await ctx.resume();
+  try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}})}catch(e){return alert('Fikk ikke tilgang til mikrofonen. Tillat mikrofon i Safari.')}
+  src=ctx.createMediaStreamSource(stream);proc=ctx.createScriptProcessor(4096,1,1);const mute=ctx.createGain();mute.gain.value=0;
+  src.connect(proc);proc.connect(mute);mute.connect(ctx.destination);
+  proc.onaudioprocess=e=>{if(!talking||!ws||ws.readyState!==1)return;const i=e.inputBuffer.getChannelData(0),ratio=ctx.sampleRate/RATE,len=Math.floor(i.length/ratio),o=new Int16Array(len);
+  for(let k=0;k<len;k++){const s=Math.max(-1,Math.min(1,i[Math.floor(k*ratio)]));o[k]=s*32767}ws.send(o.buffer)};
+  $('login').style.display='none';$('chat').style.display='block';connect()};
+function connect(){
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host);ws.binaryType='arraybuffer';
+  ws.onopen=()=>{$('status').textContent='🟢 Tilkoblet';sendState()};
+  ws.onclose=()=>{$('status').textContent='🔴 Frakoblet – prøver igjen…';setTimeout(connect,2000)};
+  ws.onmessage=e=>{
+    if(typeof e.data!=='string')return play(e.data);
+    const m=JSON.parse(e.data);
+    if(m.t==='error'){alert(m.error||'Feil passord');return}
+    if(m.t==='users'){
+      const room=m.room||talk;
+      members[room]=Array.isArray(m.users)?m.users:[];
+      render();
+    }
+    if(m.t==='start'||m.t==='stop'){
+      const room=m.room||talk;
+      speakers[room]=speakers[room]||{};
+      if(m.t==='start')speakers[room][m.name]=true;else delete speakers[room][m.name];
+      whoText();render();
+    }
+  };
+}
 function play(buf){const d=new Int16Array(buf),b=ctx.createBuffer(1,d.length,RATE),c=b.getChannelData(0);for(let k=0;k<d.length;k++)c[k]=d[k]/32768;
-const s=ctx.createBufferSource();s.buffer=b;s.connect(ctx.destination);const now=ctx.currentTime;if(playT<now)playT=now+0.1;s.start(playT);playT+=b.duration}
-function down(e){e.preventDefault();if(talking)return;ctx.resume();talking=true;$('ptt').classList.add('on');$('ptt').textContent='Snakker…';ws&&ws.readyState==1&&ws.send(JSON.stringify({t:'start'}))}
-function up(e){e.preventDefault();if(!talking)return;talking=false;$('ptt').classList.remove('on');$('ptt').textContent='Hold for å snakke';ws&&ws.readyState==1&&ws.send(JSON.stringify({t:'stop'}))}
+const s=ctx.createBufferSource();s.buffer=b;s.connect(ctx.destination);const now=ctx.currentTime;if(playT<now)playT=now+0.14;s.start(playT);playT+=b.duration}
+function down(e){e.preventDefault();if(talking||!talk)return;ctx.resume();talking=true;$('ptt').classList.add('on');$('ptt').textContent='Snakker…';render();ws&&ws.readyState===1&&ws.send(JSON.stringify({t:'start',room:talk}))}
+function up(e){e.preventDefault();if(!talking)return;talking=false;$('ptt').classList.remove('on');$('ptt').textContent='Hold for å snakke';render();ws&&ws.readyState===1&&ws.send(JSON.stringify({t:'stop',room:talk}))}
 const p=$('ptt');p.addEventListener('touchstart',down,{passive:false});p.addEventListener('touchend',up);p.addEventListener('touchcancel',up);p.addEventListener('mousedown',down);addEventListener('mouseup',up);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&ctx)ctx.resume()});
 </script></body></html>

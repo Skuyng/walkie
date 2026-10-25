@@ -3,17 +3,25 @@ import os
 
 /// Events from the walkie server. Binary audio is delivered separately.
 enum ServerEvent {
-    case users([String])
-    case talkStarted(String)
-    case talkStopped(String)
+    case users(room: String, names: [String])
+    case talkStarted(name: String, room: String)
+    case talkStopped(name: String, room: String)
+    case rejected(room: String, message: String)
+}
+
+struct GroupWire: Encodable {
+    var room: String
+    var password: String
+    var create: Bool
+    var listen: Bool
 }
 
 /// WebSocket client for the protocol in `server.js`.
 ///
-/// Text frames are JSON. The phone sends `{t:join,name,room}`, `{t:start}`
-/// and `{t:stop}`. The server broadcasts `{t:users,users}` to the channel and
-/// `{t:start,name}` / `{t:stop,name}` to everyone except the sender.
-/// Binary frames are PCM16 audio and are relayed untouched to the rest of the channel.
+/// `{t:groups}` subscribes to several rooms. `{t:join}` still selects one room
+/// so an older server keeps working. `{t:start}` and `{t:stop}` include the
+/// talk room. Binary frames stay raw PCM16 and are only relayed to members
+/// who are allowed to hear that room.
 final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
     var onOpen: (() -> Void)?
     var onClose: ((Error?) -> Void)?
@@ -65,16 +73,20 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
         previous.0?.cancel(with: .goingAway, reason: nil)
     }
 
-    func sendJoin(name: String, room: String) {
-        send(Outbound(t: "join", name: name, room: room))
+    func sendGroups(name: String, talk: String, groups: [GroupWire]) {
+        sendEncodable(GroupsOutbound(name: name, talk: talk, groups: groups))
     }
 
-    func sendStart() {
-        send(Outbound(t: "start"))
+    func sendJoin(name: String, room: String, password: String) {
+        sendEncodable(Outbound(t: "join", name: name, room: room, password: password))
     }
 
-    func sendStop() {
-        send(Outbound(t: "stop"))
+    func sendStart(room: String) {
+        sendEncodable(Outbound(t: "start", room: room))
+    }
+
+    func sendStop(room: String) {
+        sendEncodable(Outbound(t: "stop", room: room))
     }
 
     func send(audio: Data) {
@@ -114,7 +126,7 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
         reportClose(of: socketTask, error: error)
     }
 
-    private func send(_ message: Outbound) {
+    private func sendEncodable<Message: Encodable>(_ message: Message) {
         guard let data = try? JSONEncoder().encode(message),
               let text = String(data: data, encoding: .utf8) else { return }
         let task = withLock { $0.task }
@@ -199,13 +211,16 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
               let message = try? JSONDecoder().decode(Inbound.self, from: data) else { return nil }
         switch message.t {
         case "users":
-            return .users(message.users ?? [])
+            return .users(room: message.room ?? "", names: message.users ?? [])
         case "start":
             guard let name = message.name else { return nil }
-            return .talkStarted(name)
+            return .talkStarted(name: name, room: message.room ?? "")
         case "stop":
             guard let name = message.name else { return nil }
-            return .talkStopped(name)
+            return .talkStopped(name: name, room: message.room ?? "")
+        case "error":
+            let messageText = message.error ?? "Feil passord"
+            return .rejected(room: message.room ?? "", message: messageText)
         default:
             return nil
         }
@@ -218,18 +233,27 @@ private final class SocketState {
     var pingTimer: DispatchSourceTimer?
 }
 
+private struct GroupsOutbound: Encodable {
+    var t = "groups"
+    var name: String
+    var talk: String
+    var groups: [GroupWire]
+}
+
 private struct Outbound: Encodable {
     var t: String
     var name: String?
     var room: String?
+    var password: String?
 
-    enum CodingKeys: String, CodingKey { case t, name, room }
+    enum CodingKeys: String, CodingKey { case t, name, room, password }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(t, forKey: .t)
         try container.encodeIfPresent(name, forKey: .name)
         try container.encodeIfPresent(room, forKey: .room)
+        try container.encodeIfPresent(password, forKey: .password)
     }
 }
 
@@ -237,4 +261,6 @@ private struct Inbound: Decodable {
     var t: String
     var name: String?
     var users: [String]?
+    var room: String?
+    var error: String?
 }

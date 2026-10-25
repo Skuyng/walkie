@@ -1,6 +1,6 @@
 # Walkie
 
-Enkel walkie-talkie i nettleseren. Skriv navn og kanalkode, hold inne knappen, og snakk med andre på samme kanal.
+Enkel walkie-talkie i nettleseren. Opprett en gruppe eller bli med på navnet, hold inne knappen, og snakk med andre i gruppen. Du kan lytte til flere grupper samtidig.
 
 ## Kom i gang
 
@@ -13,4 +13,4 @@ Serveren lytter på `PORT` fra miljøet, ellers port 8080. Åpne adressen i nett
 
 ## iPhone
 
-Native app for iOS 17 ligger i [`ios/`](ios/README.md). Den bruker samme kanal og samme PCM-lyd som nettsiden. Standard server i appen er `wss://walkie-bc0z.onrender.com`.
+Native app for iOS 26 ligger i [`ios/`](ios/README.md). Den bruker samme grupper og samme PCM-lyd som nettsiden. Standard server i appen er `wss://walkie-bc0z.onrender.com`.
