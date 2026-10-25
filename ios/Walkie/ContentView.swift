@@ -742,12 +742,16 @@ private struct TalkBottomBar: View {
                 tint: speakerTint,
                 action: onSpeaker
             )
-            TalkIconButton(
-                systemImage: "speaker.wave.2.fill",
-                title: session.t(.incomingVolume),
-                tint: volumeOpen ? Aurora.teal : .primary,
-                action: onVolume
-            )
+            Button(action: onVolume) {
+                Text(volumeLabel)
+                    .font(.system(size: 20, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(volumeOpen ? Aurora.teal : .primary)
+                    .lineLimit(1)
+                    .frame(width: 80, height: 48)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(session.t(.incomingVolume))
+            .accessibilityValue(volumeLabel)
             .background(volumeAnchor)
             TalkIconButton(systemImage: "moon.fill", title: session.t(.darkMode), tint: .primary, action: onDark)
             if link == .connect {
@@ -768,6 +772,10 @@ private struct TalkBottomBar: View {
         .padding(.vertical, 8)
         .glassEffect(.regular, in: Capsule())
         .accessibilityElement(children: .contain)
+    }
+
+    private var volumeLabel: String {
+        "\(Int((session.listenGain * 100).rounded())) %"
     }
 
     private var volumeAnchor: some View {
