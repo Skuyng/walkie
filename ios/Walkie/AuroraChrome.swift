@@ -192,9 +192,22 @@ final class AudioLevels: ObservableObject {
     @Published private(set) var mic: Float = 0
     @Published private(set) var remote: Float = 0
     let meter = LevelMeter()
+    private(set) var micTrace = [Float](repeating: 0, count: Self.traceCount)
+    private(set) var remoteTrace = [Float](repeating: 0, count: Self.traceCount)
     private var task: Task<Void, Never>?
     private var micState: Float = 0
     private var remoteState: Float = 0
+    private var micBeat = 0
+    private var remoteBeat = 0
+
+    /// One monitor beat: flat, small P, sharp QRS, T, then rest. About two beats a second.
+    private static let beat: [Float] = [
+        0, 0, 0.07, 0,
+        -0.22, 1, -0.5, 0,
+        0, 0.18, 0.22, 0.08,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ]
+    private static let traceCount = 96
 
     func start() {
         guard task == nil else { return }
@@ -208,10 +221,27 @@ final class AudioLevels: ObservableObject {
                 self.remoteState = remoteNext
                 self.assignMic(micNext)
                 self.assignRemote(remoteNext)
-                let live = micNext > 0.02 || remoteNext > 0.02 || sample.mic > 0.02 || sample.remote > 0.02
-                try? await Task.sleep(for: .milliseconds(live ? 22 : 160))
+                let micSample = self.shaped(micNext, cursor: &self.micBeat, gain: 1)
+                let remoteSample = self.shaped(remoteNext, cursor: &self.remoteBeat, gain: 0.62)
+                self.push(&self.micTrace, micSample)
+                self.push(&self.remoteTrace, remoteSample)
+                try? await Task.sleep(for: .milliseconds(22))
             }
         }
+    }
+
+    /// Silence stays on the baseline. Voice prints a spike whose height follows the level.
+    private func shaped(_ level: Float, cursor: inout Int, gain: Float) -> Float {
+        let span = max(0, level - 0.2) / 0.8
+        let sample = Self.beat[cursor] * span * gain
+        cursor += 1
+        if cursor >= Self.beat.count { cursor = 0 }
+        return sample
+    }
+
+    private func push(_ trace: inout [Float], _ value: Float) {
+        if !trace.isEmpty { trace.removeFirst() }
+        trace.append(value)
     }
 
     private func assignMic(_ value: Float) {
@@ -232,49 +262,39 @@ final class AudioLevels: ObservableObject {
     }
 }
 
-/// Liquid fill clipped by the caller. Quiet while the mic is open and silent; hidden when idle.
+/// One glowing trace across the middle of the button. Flat in silence, ECG spikes while someone speaks.
 struct TalkLevelFill: View {
     @ObservedObject var levels: AudioLevels
     var transmitting: Bool
     var receiving: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: frameInterval)) { timeline in
-            TalkLevelCanvas(
-                time: timeline.date.timeIntervalSinceReferenceDate,
-                mic: CGFloat(levels.mic),
-                remote: CGFloat(levels.remote),
-                transmitting: transmitting,
-                receiving: receiving
-            )
+        TimelineView(.animation(minimumInterval: frameInterval)) { _ in
+            TalkLevelCanvas(samples: trace, bright: transmitting, subtler: receiving && !transmitting)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 
+    private var trace: [Float] {
+        if transmitting { return levels.micTrace }
+        if receiving { return levels.remoteTrace }
+        return levels.micTrace
+    }
+
     private var frameInterval: Double {
-        (transmitting || receiving) ? 1.0 / 45.0 : 1
+        (transmitting || receiving) ? 1.0 / 45.0 : 1.0 / 8.0
     }
 }
 
 private struct TalkLevelCanvas: View {
-    var time: TimeInterval
-    var mic: CGFloat
-    var remote: CGFloat
-    var transmitting: Bool
-    var receiving: Bool
+    var samples: [Float]
+    var bright: Bool
+    var subtler: Bool
 
     var body: some View {
         Canvas { context, size in
-            TalkLevelDraw.draw(
-                context: &context,
-                size: size,
-                time: time,
-                mic: mic,
-                remote: remote,
-                transmitting: transmitting,
-                receiving: receiving
-            )
+            TalkLevelDraw.draw(context: &context, size: size, samples: samples, bright: bright, subtler: subtler)
         }
     }
 }
@@ -283,70 +303,33 @@ private enum TalkLevelDraw {
     static func draw(
         context: inout GraphicsContext,
         size: CGSize,
-        time: TimeInterval,
-        mic: CGFloat,
-        remote: CGFloat,
-        transmitting: Bool,
-        receiving: Bool
+        samples: [Float],
+        bright: Bool,
+        subtler: Bool
     ) {
-        guard transmitting || receiving, size.width > 1, size.height > 1 else { return }
-        let level = min(1, max(0, transmitting ? mic : remote))
-        let rise = transmitting ? (0.16 + level * 0.74) : (0.10 + level * 0.38)
-        let glow = transmitting ? (0.20 + level * 0.72) : (0.10 + level * 0.30)
-        let speed = transmitting ? 1.0 : 0.55
-        let energy = 0.03 + level * (transmitting ? 0.10 : 0.05)
+        guard size.width > 1, size.height > 1, samples.count > 1 else { return }
         context.clip(to: Path(ellipseIn: CGRect(origin: .zero, size: size)))
-        let layers = bands(transmitting: transmitting)
-        for (index, band) in layers.enumerated() {
-            let path = wavePath(
-                size: size,
-                time: time * speed,
-                rise: rise - CGFloat(index) * 0.04,
-                energy: energy,
-                frequency: band.frequency,
-                phase: band.phase
-            )
-            context.fill(path, with: .color(band.color.opacity(glow * band.gain)))
-        }
-    }
-
-    private static func bands(transmitting: Bool) -> [(color: Color, frequency: Double, phase: Double, gain: Double)] {
-        if transmitting {
-            return [
-                (Aurora.violet, 1.15, 0.4, 0.55),
-                (Aurora.teal, 1.75, 1.8, 0.82),
-                (Aurora.green, 2.3, 3.0, 0.95)
-            ]
-        }
-        return [
-            (Aurora.violet, 0.75, 0.5, 0.65),
-            (Aurora.teal, 1.1, 2.0, 0.7)
-        ]
-    }
-
-    private static func wavePath(
-        size: CGSize,
-        time: TimeInterval,
-        rise: CGFloat,
-        energy: CGFloat,
-        frequency: Double,
-        phase: Double
-    ) -> Path {
+        let mid = size.height * 0.5
+        let topReserve = size.height * 0.12 + 48
+        let bottomReserve = size.height * 0.14 + 36
+        let reach = max(10, min(mid - topReserve, mid - bottomReserve))
         var path = Path()
-        let surface = size.height * (1 - max(0.05, rise))
-        path.move(to: CGPoint(x: 0, y: size.height))
-        let steps = 36
-        for step in 0...steps {
-            let t = CGFloat(step) / CGFloat(steps)
-            let along = Double(t)
-            let primary = sin(along * frequency * .pi * 2 + time * frequency + phase)
-            let secondary = sin(along * (frequency + 1.4) * .pi * 2 - time * 0.65 + phase)
-            let y = surface + CGFloat(primary * 0.72 + secondary * 0.28) * energy * size.height
-            path.addLine(to: CGPoint(x: t * size.width, y: y))
+        let last = samples.count - 1
+        for index in samples.indices {
+            let x = size.width * CGFloat(index) / CGFloat(last)
+            let y = mid - CGFloat(samples[index]) * reach
+            if index == 0 {
+                path.move(to: CGPoint(x: x, y: y))
+            } else {
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
         }
-        path.addLine(to: CGPoint(x: size.width, y: size.height))
-        path.closeSubpath()
-        return path
+        let glow = subtler ? 0.28 : (bright ? 0.62 : 0.24)
+        let core = subtler ? 0.55 : (bright ? 1 : 0.45)
+        let wide = StrokeStyle(lineWidth: subtler ? 6 : 9, lineCap: .round, lineJoin: .round)
+        let thin = StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+        context.stroke(path, with: .color(Aurora.green.opacity(glow)), style: wide)
+        context.stroke(path, with: .color(Aurora.teal.opacity(core)), style: thin)
     }
 }
 
