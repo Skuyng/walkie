@@ -31,6 +31,7 @@ final class WalkieSession: ObservableObject {
     @Published private(set) var accountUsername = ""
     @Published private(set) var invites: [WalkieInvite] = []
     @Published private(set) var requests: [WalkieRequest] = []
+    @Published private(set) var blockedUsernames: [String] = []
 
     var canTransmit: Bool {
         linkState == .connected && audioReady
@@ -203,7 +204,12 @@ final class WalkieSession: ObservableObject {
         saveGroups()
     }
 
-    func signUp(username rawUser: String, displayName rawDisplay: String, password rawPassword: String) {
+    func signUp(username rawUser: String, displayName rawDisplay: String, password rawPassword: String, acceptedTerms: Bool) {
+        guard acceptedTerms else {
+            suggestsSettings = false
+            errorMessage = "Du må godta vilkårene."
+            return
+        }
         let user = Self.normalizeUsername(rawUser)
         let display = Self.clip(rawDisplay, limit: 30)
         let password = String(rawPassword.prefix(80))
@@ -260,6 +266,7 @@ final class WalkieSession: ObservableObject {
         groups = []
         invites = []
         requests = []
+        blockedUsernames = []
         talkGroup = ""
         room = ""
         preferTalk = nil
@@ -389,6 +396,42 @@ final class WalkieSession: ObservableObject {
 
     func removeMember(room: String, username: String) {
         socket.sendRemoveMember(room: room, username: username)
+    }
+
+    func isBlocked(_ username: String) -> Bool {
+        blockedUsernames.contains(username)
+    }
+
+    func setBlocked(_ username: String, _ blocked: Bool) {
+        if blocked {
+            socket.sendBlock(username: username)
+        } else {
+            socket.sendUnblock(username: username)
+        }
+    }
+
+    func report(username: String, room: String) {
+        socket.sendReport(username: username, room: room, reason: "Uakseptabel oppførsel")
+    }
+
+    func deleteAccount() {
+        guard signedIn, socketOpen else {
+            suggestsSettings = false
+            errorMessage = "Logg inn"
+            return
+        }
+        socket.sendDeleteAccount()
+    }
+
+    static func webPage(_ path: String, server: String) -> URL? {
+        guard let socketURL = normalizeServerURL(server),
+              var parts = URLComponents(url: socketURL, resolvingAgainstBaseURL: false) else { return nil }
+        if parts.scheme == "wss" { parts.scheme = "https" }
+        if parts.scheme == "ws" { parts.scheme = "http" }
+        parts.path = path
+        parts.query = nil
+        parts.fragment = nil
+        return parts.url
     }
 
     func setListening(_ id: String, _ listen: Bool) {
@@ -713,8 +756,16 @@ final class WalkieSession: ObservableObject {
                 statusText = "Innlogget"
             }
             savePreferences()
-        case .inbox(let serverGroups, let nextInvites, let nextRequests):
+        case .inbox(let serverGroups, let nextInvites, let nextRequests, let blocked):
+            blockedUsernames = blocked
             applyInbox(serverGroups, invites: nextInvites, requests: nextRequests)
+        case .reported:
+            suggestsSettings = false
+            errorMessage = "Rapporten er sendt."
+        case .accountDeleted:
+            suggestsSettings = false
+            errorMessage = "Kontoen er slettet."
+            logOut()
         case .users(let room, let members, let selfID):
             let key = room.isEmpty ? talkGroup : room
             guard !key.isEmpty else { return }

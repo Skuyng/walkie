@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Signup, invite, and audio: only members receive frames. Same display name
 // on purpose. Restarts the JSON store and resumes the session token.
+// Terms, block, report, and account deletion are checked too.
 //
 //   node scripts/relay-check.js --local
 
@@ -11,6 +12,7 @@ const path = require('path');
 const WebSocket = require('ws');
 
 const storeFile = path.join(os.tmpdir(), 'walkie-account-' + process.pid + '.json');
+let activeChild = null;
 
 function connect(url) {
   return new Promise((resolve, reject) => {
@@ -52,6 +54,20 @@ function send(client, payload) {
   client.ws.send(JSON.stringify(payload));
 }
 
+function signup(client, username, name, password) {
+  send(client, { t: 'signup', username, name, password, terms: true });
+}
+
+function getText(url) {
+  return new Promise((resolve, reject) => {
+    require('http').get(url, (res) => {
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    }).on('error', reject);
+  });
+}
+
 function jsonText(entry) {
   return JSON.parse(entry.text);
 }
@@ -63,6 +79,7 @@ async function startServer() {
     env: { ...process.env, PORT: String(port), STORE_PATH: storeFile, DATABASE_URL: '', RENDER_GIT_COMMIT: 'account-test' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
+  activeChild = child;
   let log = '';
   child.stdout.on('data', (chunk) => { log += chunk; });
   child.stderr.on('data', (chunk) => { log += chunk; });
@@ -86,14 +103,28 @@ async function startServer() {
   });
   const versionJson = JSON.parse(version);
   if (versionJson.store !== 'json') throw new Error('expected json store ' + version);
+  const personvern = await getText(server.http + '/personvern');
+  if (personvern.status !== 200 || !personvern.body.includes('Lyden lagres ikke') || !personvern.body.includes('never stored')) {
+    throw new Error('personvern ' + personvern.status);
+  }
+  const vilkar = await getText(server.http + '/vilkar');
+  if (vilkar.status !== 200 || !vilkar.body.includes('nulltoleranse') || !vilkar.body.includes('zero tolerance')) {
+    throw new Error('vilkar ' + vilkar.status);
+  }
+
+  const bare = await connect(server.url);
+  send(bare, { t: 'signup', username: 'ada', name: 'Sku', password: 'secret1' });
+  const needsTerms = jsonText(await waitFor(bare.inbox, (entry) => !entry.bin && entry.text.includes('vilkårene')));
+  if (!String(needsTerms.error || '').includes('vilkårene')) throw new Error('signup without terms was accepted');
+  bare.ws.close();
 
   const ada = await connect(server.url);
-  send(ada, { t: 'signup', username: 'ada', name: 'Sku', password: 'secret1' });
+  signup(ada, 'ada', 'Sku', 'secret1');
   const adaSession = jsonText(await waitFor(ada.inbox, (entry) => !entry.bin && entry.text.includes('"session"')));
   if (!adaSession.token || adaSession.username !== 'ada') throw new Error('signup session ' + adaSession.token);
 
   const dup = await connect(server.url);
-  send(dup, { t: 'signup', username: 'ada', name: 'Annen', password: 'secret1' });
+  signup(dup, 'ada', 'Annen', 'secret1');
   const taken = jsonText(await waitFor(dup.inbox, (entry) => !entry.bin && entry.text.includes('opptatt')));
   if (!taken.error.includes('opptatt')) throw new Error(taken.error);
   dup.ws.close();
@@ -108,7 +139,7 @@ async function startServer() {
   if (!adaInbox.groups.some((group) => group.id === 'familie' && group.admin)) throw new Error('admin group missing');
 
   const bob = await connect(server.url);
-  send(bob, { t: 'signup', username: 'bob', name: 'Sku', password: 'secret2' });
+  signup(bob, 'bob', 'Sku', 'secret2');
   const bobSession = jsonText(await waitFor(bob.inbox, (entry) => !entry.bin && entry.text.includes('"session"')));
   send(bob, { t: 'requestJoin', name: 'Familie' });
   const adaRequest = jsonText(await waitFor(ada.inbox, (entry) => !entry.bin && entry.text.includes('"requests"') && entry.text.includes('bob')));
@@ -136,7 +167,7 @@ async function startServer() {
   if (!heard.data.equals(frame)) throw new Error('member audio mismatch');
 
   const cara = await connect(server.url);
-  send(cara, { t: 'signup', username: 'cara', name: 'Cara', password: 'secret3' });
+  signup(cara, 'cara', 'Cara', 'secret3');
   await waitFor(cara.inbox, (entry) => !entry.bin && entry.text.includes('"session"'));
   const caraMark = cara.inbox.length;
   ada.ws.send(frame);
@@ -211,6 +242,41 @@ async function startServer() {
   ada.ws.send(frame);
   const rejoined = await waitFor(bob.inbox, (entry) => entry.bin, 3000, hearAt);
   if (!rejoined.data.equals(frame)) throw new Error('password member missed audio');
+
+  const blockAt = ada.inbox.length;
+  send(ada, { t: 'block', username: 'bob' });
+  await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && Array.isArray(message.blocked) && message.blocked.includes('bob');
+    } catch { return false; }
+  }, 4000, blockAt);
+  const mutedAt = ada.inbox.length;
+  const caraStill = cara.inbox.length;
+  bob.ws.send(frame);
+  const caraHeardBlock = await waitFor(cara.inbox, (entry) => entry.bin, 3000, caraStill);
+  if (!caraHeardBlock.data.equals(frame)) throw new Error('block stopped audio for someone else');
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (ada.inbox.slice(mutedAt).some((entry) => entry.bin)) throw new Error('blocked audio was played');
+  const unblockAt = ada.inbox.length;
+  send(ada, { t: 'unblock', username: 'bob' });
+  await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && Array.isArray(message.blocked) && !message.blocked.includes('bob');
+    } catch { return false; }
+  }, 4000, unblockAt);
+  const openAt = ada.inbox.length;
+  bob.ws.send(frame);
+  const unblocked = await waitFor(ada.inbox, (entry) => entry.bin, 3000, openAt);
+  if (!unblocked.data.equals(frame)) throw new Error('unblock did not restore audio');
+  const reportAt = ada.inbox.length;
+  send(ada, { t: 'report', username: 'bob', room: 'familie', reason: 'Uakseptabel oppførsel' });
+  const reported = jsonText(await waitFor(ada.inbox, (entry) => !entry.bin && entry.text.includes('"reported"'), 4000, reportAt));
+  if (reported.t !== 'reported') throw new Error('report was not stored');
+
   const clearAt = ada.inbox.length;
   send(ada, { t: 'setPassword', room: 'familie', password: '' });
   await waitFor(ada.inbox, (entry) => {
@@ -245,13 +311,56 @@ async function startServer() {
   if (!still.groups.some((group) => group.id === 'familie' && group.admin)) throw new Error('group missing after restart');
   if (!still.groups.some((group) => group.id === 'jobb' && group.locked === true)) throw new Error('password missing after restart');
 
+  const bobAgain = await connect(server.url);
+  send(bobAgain, { t: 'login', username: 'bob', password: 'secret2' });
+  await waitFor(bobAgain.inbox, (entry) => !entry.bin && entry.text.includes('"session"'));
+  const caraAgain = await connect(server.url);
+  send(caraAgain, { t: 'login', username: 'cara', password: 'secret3' });
+  await waitFor(caraAgain.inbox, (entry) => !entry.bin && entry.text.includes('"session"'));
+  const beforeDelete = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+  const adaId = (beforeDelete.users.find((user) => user.username === 'ada') || {}).id;
+  const caraId = (beforeDelete.users.find((user) => user.username === 'cara') || {}).id;
+  const familieMembers = beforeDelete.members.filter((member) => member.groupId === 'familie' && member.userId !== adaId);
+  familieMembers.sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0) || String(a.userId).localeCompare(String(b.userId)));
+  if (!familieMembers.length || familieMembers[0].userId !== caraId) throw new Error('expected cara to be the oldest other member');
+  const deleteAt = again.inbox.length;
+  const caraDeleteAt = caraAgain.inbox.length;
+  send(again, { t: 'deleteAccount' });
+  const deleted = jsonText(await waitFor(again.inbox, (entry) => !entry.bin && entry.text.includes('"deleted"'), 4000, deleteAt));
+  if (deleted.t !== 'deleted') throw new Error('account was not deleted');
+  await waitFor(caraAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      const familie = (message.groups || []).find((group) => group.id === 'familie');
+      return message.t === 'inbox' && familie && familie.admin === true && !(message.groups || []).some((group) => group.id === 'jobb');
+    } catch { return false; }
+  }, 4000, caraDeleteAt);
+  const saved = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+  if (saved.users.some((user) => user.username === 'ada')) throw new Error('deleted user remains');
+  if (saved.sessions.some((session) => session.userId === adaId)) throw new Error('deleted session remains');
+  if (saved.members.some((member) => member.userId === adaId)) throw new Error('deleted membership remains');
+  if (saved.groups.some((group) => group.id === 'jobb')) throw new Error('empty admin group survived');
+  const familie = saved.groups.find((group) => group.id === 'familie');
+  const caraMember = saved.members.find((member) => member.groupId === 'familie' && member.userId === caraId);
+  if (!familie || familie.ownerId !== caraId || !caraMember || caraMember.role !== 'admin') throw new Error('admin was not transferred');
+  if (!saved.reports.some((report) => report.reporter === 'ada' && report.targetUsername === 'bob')) throw new Error('report missing from store');
+  const dead = await connect(server.url);
+  send(dead, { t: 'resume', token });
+  const gone = jsonText(await waitFor(dead.inbox, (entry) => !entry.bin && entry.text.includes('Logg inn')));
+  if (!String(gone.error || '').includes('Logg inn')) throw new Error('deleted token still resumed');
+
   console.log('accounts ok', versionJson.store);
+  bobAgain.ws.close();
+  caraAgain.ws.close();
+  dead.ws.close();
   again.ws.close();
   server.child.kill();
   try { fs.unlinkSync(storeFile); } catch {}
   process.exit(0);
 })().catch((error) => {
   console.error(error);
+  if (activeChild) activeChild.kill();
   try { fs.unlinkSync(storeFile); } catch {}
   process.exit(1);
 });

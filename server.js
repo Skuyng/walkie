@@ -50,6 +50,8 @@ const srv = http.createServer((q, r) => {
     return r.end(JSON.stringify({ sha, commit: sha, store: store ? store.kind : 'starting' }));
   }
   if (p === '/') p = '/index.html';
+  if (p === '/personvern') p = '/personvern.html';
+  if (p === '/vilkar') p = '/vilkar.html';
   const f = path.join(__dirname, 'public', path.normalize(p));
   fs.readFile(f, (e, d) => {
     if (e) {
@@ -79,6 +81,7 @@ function bc(room, data, except, bin) {
     if (client === except || client.readyState !== 1) continue;
     if (bin) {
       if (!listening(client, room) || !authed(client, room)) continue;
+      if (except && except.user && client.blocked && client.blocked.has(except.user.id)) continue;
     } else if (!authed(client, room)) {
       continue;
     }
@@ -131,7 +134,8 @@ async function sendInbox(ws) {
   const groups = await store.groupsFor(ws.user.id);
   const invites = await store.invitesFor(ws.user.id);
   const requests = await store.requestsForAdmin(ws.user.id);
-  send(ws, { t: 'inbox', groups, invites, requests });
+  const blocked = await store.blockedUsernames(ws.user.id);
+  send(ws, { t: 'inbox', groups, invites, requests, blocked });
   return groups;
 }
 
@@ -175,6 +179,7 @@ async function establish(ws, user, token) {
   ws.token = token;
   ws.username = user.username;
   ws.name = user.displayName;
+  ws.blocked = new Set(await store.blockedIds(user.id));
   send(ws, { t: 'session', token, username: user.username, name: user.displayName });
   const groups = await sendInbox(ws);
   const previous = new Set([...(ws.auth || [])]);
@@ -205,6 +210,10 @@ async function signup(ws, message) {
     sendError(ws, '', 'Passordet må ha minst 4 tegn.');
     return;
   }
+  if (message.terms !== true) {
+    sendError(ws, '', 'Du må godta vilkårene.');
+    return;
+  }
   const user = await store.createUser(username, displayName, password);
   const token = await store.createSession(user.id);
   await establish(ws, user, token);
@@ -231,11 +240,74 @@ async function resume(ws, message) {
   await establish(ws, user, String(message.token || ''));
 }
 
+async function refreshBlocks(userId) {
+  const ids = new Set(await store.blockedIds(userId));
+  for (const client of wss.clients) {
+    if (client.readyState !== 1 || !client.user || client.user.id !== userId) continue;
+    client.blocked = ids;
+    await sendInbox(client);
+  }
+}
+
+async function blockUser(ws, message) {
+  if (!requireUser(ws)) return;
+  const username = normUser(message.username);
+  if (!validUser(username)) {
+    sendError(ws, '', 'Skriv et brukernavn.');
+    return;
+  }
+  await store.block(ws.user.id, username);
+  await refreshBlocks(ws.user.id);
+}
+
+async function unblockUser(ws, message) {
+  if (!requireUser(ws)) return;
+  const username = normUser(message.username);
+  if (!validUser(username)) {
+    sendError(ws, '', 'Skriv et brukernavn.');
+    return;
+  }
+  await store.unblock(ws.user.id, username);
+  await refreshBlocks(ws.user.id);
+}
+
+async function reportUser(ws, message) {
+  if (!requireUser(ws)) return;
+  const username = normUser(message.username);
+  if (!validUser(username)) {
+    sendError(ws, '', 'Skriv et brukernavn.');
+    return;
+  }
+  await store.report(ws.user.id, username, normRoom(message.room), message.reason);
+  send(ws, { t: 'reported' });
+}
+
+async function deleteAccount(ws) {
+  if (!requireUser(ws)) return;
+  const userId = ws.user.id;
+  const rooms = await store.deleteAccount(userId);
+  for (const client of wss.clients) {
+    if (!client.user || client.user.id !== userId) continue;
+    send(client, { t: 'deleted' });
+    client.user = null;
+    client.token = '';
+    client.username = '';
+    client.name = '';
+    client.auth = new Set();
+    client.rooms = new Set();
+    client.talk = '';
+    client.room = '';
+    client.blocked = new Set();
+  }
+  await syncAll(rooms || []);
+}
+
 async function logout(ws) {
   if (ws.token) await store.deleteSession(ws.token);
   const previous = new Set([...(ws.auth || []), ...(ws.rooms || [])]);
   ws.user = null;
   ws.token = '';
+  ws.blocked = new Set();
   ws.username = '';
   ws.name = '';
   ws.auth = new Set();
@@ -396,6 +468,7 @@ wss.on('connection', (ws) => {
   ws.room = '';
   ws.user = null;
   ws.token = '';
+  ws.blocked = new Set();
   ws.on('pong', () => {
     ws.isAlive = true;
   });
@@ -435,6 +508,10 @@ async function handleMessage(ws, message) {
   if (message.t === 'login') return login(ws, message);
   if (message.t === 'resume') return resume(ws, message);
   if (message.t === 'logout') return logout(ws);
+  if (message.t === 'deleteAccount') return deleteAccount(ws);
+  if (message.t === 'block') return blockUser(ws, message);
+  if (message.t === 'unblock') return unblockUser(ws, message);
+  if (message.t === 'report') return reportUser(ws, message);
   if (message.t === 'createGroup') return createGroup(ws, message);
   if (message.t === 'invite') return invite(ws, message);
   if (message.t === 'inviteReply') return inviteReply(ws, message);

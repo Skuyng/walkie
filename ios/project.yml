@@ -33,9 +33,12 @@ targets:
       - path: Walkie
         excludes:
           - Info.plist
+          - PrivacyInfo.xcprivacy
           - Assets.xcassets
           - Assets.xcassets/**
       - path: Walkie/Assets.xcassets
+        buildPhase: resources
+      - path: Walkie/PrivacyInfo.xcprivacy
         buildPhase: resources
     settings:
       base:
@@ -64,7 +67,7 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         CFBundleDevelopmentRegion: nb
         UILaunchScreen: {}
-        NSMicrophoneUsageDescription: Walkie trenger mikrofonen for å sende tale til andre i kanalen.
+        NSMicrophoneUsageDescription: Walkie bruker mikrofonen for å sende tale til gruppene du er med i. Lyden sendes direkte og lagres ikke. Mikrofonen brukes bare mens du er tilkoblet.
         NSLocalNetworkUsageDescription: Walkie kobler til serveren du skriver inn, også på det lokale nettverket.
         UIBackgroundModes:
           - audio

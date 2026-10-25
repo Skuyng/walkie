@@ -22,8 +22,8 @@ Du trenger en Mac med Xcode 26 og en iPhone med iOS 26 eller nyere. En betalt ut
 10. Øverst i vinduet velger du din iPhone som kjøringsmål. Simulatoren kan vise skjermen, men mikrofon, høyttaler og låst skjerm må prøves på telefonen.
 11. Trykk **Run** (▶). Første bygging tar litt tid. Telefonen må være ulåst.
 12. Hvis appen ikke starter fordi utvikleren ikke er klarert: på iPhone, **Innstillinger → Generelt → VPN og enhetsadministrasjon** (på noen versjoner heter det **Enhetsadministrasjon**). Velg profilen din og trykk **Stol på**.
-13. Åpne Walkie. Opprett en konto (brukernavn, visningsnavn, passord) eller logg inn.
-14. Opprett en gruppe eller be om å bli med, sjekk serveradressen, og trykk **Koble til**. Tillat mikrofon når iOS spør. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe. **Logg ut** ligger i Grupper.
+13. Åpne Walkie. Opprett en konto (brukernavn, visningsnavn, passord) eller logg inn. Ny konto krever at du godtar vilkårene.
+14. Opprett en gruppe eller be om å bli med, sjekk serveradressen, og trykk **Koble til**. Tillat mikrofon når iOS spør. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe. **Logg ut** og **Slett konto** ligger i Grupper.
 
 En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xcode på nytt. Et personlig team kan bare ha noen få egne apper installert samtidig.
 
@@ -32,7 +32,11 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Brukernavn** — unikt, 3–20 tegn (a–z, 0–9, punktum, bindestrek, understrek).
 - **Visningsnavn** — det andre ser (maks 30 tegn).
 - **Passord** — minst 4 tegn. Serveren lagrer en scrypt-hash, ikke passordet.
-- **Logg ut** — i Grupper-arket. Tokenet slettes fra Keychain.
+- **Logg ut** — i Grupper-arket og på hjemskjermen. Tokenet slettes fra Keychain.
+- **Vilkår** — må godtas før kontoen opprettes. Personvern og vilkår åpnes fra innlogging og fra Grupper.
+- **Blokker** — ved et annet medlem. Lyden deres spilles ikke av hos deg. Valget lagres på serveren.
+- **Rapporter** — ved et annet medlem, etter bekreftelse. Rapporten lagres på serveren.
+- **Slett konto** — i Grupper, etter bekreftelse. Brukeren, øktene og medlemskapene slettes. En gruppe du eier alene slettes. Ellers får det eldste andre medlemmet admin.
 - **Opprett gruppe** — du blir admin. Store og små bokstaver er samme gruppe. Valgfritt **Passord** låser gruppen. Hashen lagres på serveren.
 - **Be om å bli med** — uten passord. Admin godkjenner eller avslår. Har du en invitasjon, godtar du den i stedet.
 - **Bli med** — når du skriver gruppepassordet, blir du medlem med en gang. Feil passord vises som «Feil passord». En lås vises på grupper som har passord.
@@ -55,17 +59,18 @@ Appen snakker samme protokoll som `server.js` og `public/index.html`.
 
 Tekst (JSON):
 
-- til serveren: `{"t":"signup","username":"…","name":"…","password":"…"}`, `{"t":"login","username":"…","password":"…"}` eller `{"t":"resume","token":"…"}`
-- fra serveren: `{"t":"session","token":"…","username":"…","name":"…"}` og deretter `{"t":"inbox","groups":[…],"invites":[…],"requests":[…]}`
+- til serveren: `{"t":"signup","username":"…","name":"…","password":"…","terms":true}`, `{"t":"login","username":"…","password":"…"}` eller `{"t":"resume","token":"…"}`
+- fra serveren: `{"t":"session","token":"…","username":"…","name":"…"}` og deretter `{"t":"inbox","groups":[…],"invites":[…],"requests":[…],"blocked":["…"]}`
 - til serveren: `{"t":"subscribe","talk":"…","muted":["…"]}` — `muted` er grupper du er medlem av, men ikke lytter til
-- til serveren: `{"t":"createGroup","name":"…","password":"…"}` (passord kan utelates), `{"t":"joinWithPassword","name":"…","password":"…"}`, `{"t":"setPassword","room":"…","password":"…"}` (tomt passord fjerner låsen), `{"t":"invite"}`, `{"t":"inviteReply"}`, `{"t":"requestJoin"}`, `{"t":"requestReply"}`, `{"t":"removeMember"}`, `{"t":"leave"}`, `{"t":"deleteGroup"}`
+- til serveren: `{"t":"createGroup","name":"…","password":"…"}` (passord kan utelates), `{"t":"joinWithPassword","name":"…","password":"…"}`, `{"t":"setPassword","room":"…","password":"…"}` (tomt passord fjerner låsen), `{"t":"invite"}`, `{"t":"inviteReply"}`, `{"t":"requestJoin"}`, `{"t":"requestReply"}`, `{"t":"removeMember"}`, `{"t":"leave"}`, `{"t":"deleteGroup"}`, `{"t":"block"}`, `{"t":"unblock"}`, `{"t":"report"}`, `{"t":"deleteAccount"}`
+- fra serveren: `{"t":"reported"}` når rapporten er lagret, og `{"t":"deleted"}` når kontoen er slettet
 - fra serveren, i `inbox.groups`: `locked` er sant når gruppen har passord. Hashen sendes ikke ut.
 - til serveren: `{"t":"start","room":"…"}` og `{"t":"stop","room":"…"}`
 - fra serveren: `{"t":"users","room":"…","users":["…"],"members":[{"id":"…","name":"…"}],"self":"…"}` bare til medlemmer. `members` er én rad per tilkobling, så to med samme navn vises begge. `users` er fortsatt navnelisten.
 - fra serveren: `{"t":"start","name":"…","room":"…","id":"…"}` og `{"t":"stop","name":"…","room":"…","id":"…"}`
 - fra serveren: `{"t":"error","room":"…","error":"Ikke medlem"}` når du ikke er medlem
 
-Lyd sendes aldri til en socket som ikke er medlem, og bare til dem som lytter. Gruppepassord brukes ikke lenger.
+Lyd sendes aldri til en socket som ikke er medlem, og bare til dem som lytter. En blokkert avsender høres ikke hos den som blokkerte. Gruppepassord brukes ikke lenger som eneste adgang. Et valgfritt passord kan brukes i tillegg til medlemskap.
 
 Lyd er binære websocket-rammer uten filheader: **PCM, 16-bit med fortegn, little-endian, mono, 16 000 Hz**. Nettleseren legger `sample * 32767` i en `Int16Array` og spiller av med `/ 32768`. iPhone gjør det samme, så appen og nettsiden kan være i samme gruppe. Meldingsraten er fortsatt 16 kHz, slik at eldre klienter kan dekode lyden.
 
@@ -73,7 +78,7 @@ Nettleseren plukker nærmeste sample når den nedsampler. iOS bruker `AVAudioCon
 
 ## Bakgrunn og låst skjerm
 
-`Info.plist` har `UIBackgroundModes` satt til `audio`. Lydøkten er `playAndRecord` med modus `.default` (ikke `.voiceChat`, som demper høyttaleren). Bluetooth-headset bruker `allowBluetoothHFP`. A2DP brukes ikke, fordi det tar lyden vekk fra høyttaleren i en samtaleøkt. **Høyttaler** på legger til `defaultToSpeaker` og tvinger høyttaler etter at lyden er startet. Av lar lyden gå i ørepluggen når det ikke er et hodesett. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle, slik at innkommende tale kan fortsette når skjermen er låst.
+`Info.plist` har `UIBackgroundModes` satt til `audio`. Det trengs for at tale skal kunne spilles av når skjermen er låst. Appen lagrer ikke opptak. Lydøkten er `playAndRecord` med modus `.default` (ikke `.voiceChat`, som demper høyttaleren). Bluetooth-headset bruker `allowBluetoothHFP`. A2DP brukes ikke, fordi det tar lyden vekk fra høyttaleren i en samtaleøkt. **Høyttaler** på legger til `defaultToSpeaker` og tvinger høyttaler etter at lyden er startet. Av lar lyden gå i ørepluggen når det ikke er et hodesett. Økten holdes aktiv mens du er tilkoblet, og `URLSession` bruker utvidet bakgrunns-idle, slik at innkommende tale kan fortsette når skjermen er låst.
 
 Den oransje mikrofonprikken lyser mens du er tilkoblet, fordi appen holder lydøkten i gang for å kunne ta imot tale i bakgrunnen. Du sender ikke lyd før du holder knappen inne, eller holder volum opp inne.
 

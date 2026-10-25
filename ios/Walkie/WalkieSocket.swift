@@ -4,7 +4,9 @@ import os
 /// Events from the walkie server. Binary audio is delivered separately.
 enum ServerEvent {
     case session(token: String, username: String, name: String)
-    case inbox(groups: [ServerGroup], invites: [WalkieInvite], requests: [WalkieRequest])
+    case inbox(groups: [ServerGroup], invites: [WalkieInvite], requests: [WalkieRequest], blocked: [String])
+    case reported
+    case accountDeleted
     case users(room: String, members: [RoomMember], selfID: String)
     case talkStarted(name: String, room: String, id: String)
     case talkStopped(name: String, room: String, id: String)
@@ -68,7 +70,7 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
     }
 
     func sendSignup(username: String, name: String, password: String) {
-        sendEncodable(Command(t: "signup", username: username, name: name, password: password))
+        sendEncodable(Command(t: "signup", username: username, name: name, password: password, terms: true))
     }
 
     func sendLogin(username: String, password: String) {
@@ -122,6 +124,22 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
 
     func sendDeleteGroup(room: String) {
         sendEncodable(Command(t: "deleteGroup", room: room))
+    }
+
+    func sendDeleteAccount() {
+        sendEncodable(Command(t: "deleteAccount"))
+    }
+
+    func sendBlock(username: String) {
+        sendEncodable(Command(t: "block", username: username))
+    }
+
+    func sendUnblock(username: String) {
+        sendEncodable(Command(t: "unblock", username: username))
+    }
+
+    func sendReport(username: String, room: String, reason: String) {
+        sendEncodable(Command(t: "report", username: username, room: room, reason: reason))
     }
 
     func sendSubscribe(talk: String, muted: [String]) {
@@ -272,7 +290,16 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
             guard let token = message.token, let username = message.username else { return nil }
             return .session(token: token, username: username, name: message.name ?? "")
         case "inbox":
-            return .inbox(groups: message.groups ?? [], invites: message.invites ?? [], requests: message.requests ?? [])
+            return .inbox(
+                groups: message.groups ?? [],
+                invites: message.invites ?? [],
+                requests: message.requests ?? [],
+                blocked: message.blocked ?? []
+            )
+        case "reported":
+            return .reported
+        case "deleted":
+            return .accountDeleted
         case "users":
             return .users(
                 room: message.room ?? "",
@@ -328,9 +355,11 @@ private struct Command: Encodable {
     var token: String?
     var room: String?
     var accept: Bool?
+    var terms: Bool?
+    var reason: String?
 
     enum CodingKeys: String, CodingKey {
-        case t, username, name, password, token, room, accept
+        case t, username, name, password, token, room, accept, terms, reason
     }
 
     func encode(to encoder: Encoder) throws {
@@ -342,6 +371,8 @@ private struct Command: Encodable {
         try container.encodeIfPresent(token, forKey: .token)
         try container.encodeIfPresent(room, forKey: .room)
         try container.encodeIfPresent(accept, forKey: .accept)
+        try container.encodeIfPresent(terms, forKey: .terms)
+        try container.encodeIfPresent(reason, forKey: .reason)
     }
 }
 
@@ -359,9 +390,10 @@ private struct Inbound: Decodable {
     var groups: [ServerGroup]?
     var invites: [WalkieInvite]?
     var requests: [WalkieRequest]?
+    var blocked: [String]?
 
     enum CodingKeys: String, CodingKey {
-        case t, name, users, members, room, error, id, token, username, groups, invites, requests
+        case t, name, users, members, room, error, id, token, username, groups, invites, requests, blocked
         case me = "self"
     }
 }

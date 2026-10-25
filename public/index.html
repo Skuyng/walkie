@@ -18,13 +18,17 @@ input,button{font-size:18px;padding:12px;border-radius:10px;border:0;margin:6px;
 .tools input{flex:1;min-width:120px}
 label.chk{display:flex;align-items:center;gap:6px}
 .hint{color:#aaa;font-size:15px}
+a{color:#f66}
+button:disabled{opacity:.45}
 </style></head><body>
 <div id="account"><h1>📻 Walkie-Talkie</h1>
 <p class="hint">Logg inn, eller opprett en konto.</p>
 <input id="username" placeholder="Brukernavn" autocapitalize="none" autocomplete="username">
 <input id="display" placeholder="Visningsnavn (ved ny konto)" autocomplete="name">
 <input id="password" type="password" placeholder="Passord (minst 4 tegn)" autocomplete="current-password">
-<div class="row"><button id="signup" type="button">Opprett konto</button><button id="login" type="button">Logg inn</button></div>
+<label class="chk" style="width:80%;margin:8px auto;justify-content:center"><input id="terms" type="checkbox"> Jeg godtar vilkårene</label>
+<div class="row"><button id="signup" type="button" disabled>Opprett konto</button><button id="login" type="button">Logg inn</button></div>
+<p class="hint"><a href="/personvern">Personvern</a> · <a href="/vilkar">Vilkår</a></p>
 <p id="accountStatus" class="hint"></p></div>
 <div id="home" style="display:none"><h1>📻 Walkie-Talkie</h1>
 <p id="whoami" class="hint"></p>
@@ -34,7 +38,9 @@ label.chk{display:flex;align-items:center;gap:6px}
 <div id="invites"></div>
 <div id="groups"></div>
 <button id="go">Koble til</button>
-<button id="logout" type="button">Logg ut</button></div>
+<button id="logout" type="button">Logg ut</button>
+<p class="hint"><a href="/personvern">Personvern</a> · <a href="/vilkar">Vilkår</a></p>
+<button id="delete" type="button">Slett konto</button></div>
 <div id="chat" style="display:none"><div id="status">Kobler til…</div><div id="liveGroups"></div><button id="ptt">Hold for å snakke</button><div id="who"></div><button id="hangup" type="button">Koble fra</button></div>
 <script>
 const $=id=>document.getElementById(id);
@@ -45,6 +51,7 @@ let myName=localStorage.name||'';
 let groups=[];
 let invites=[];
 let requests=[];
+let blocked=[];
 let talk=localStorage.talk||'';
 let listenMap=loadListen();
 let members={};
@@ -99,16 +106,20 @@ function drawGroup(g){
   let admin='';
   if(g.admin){
     const reqs=(requests||[]).filter(item=>item.room===g.id).map(item=>'<div class="tools"><span>'+escapeHtml(item.displayName||item.username)+'</span><button data-act="yesreq" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(item.username)+'">Godta</button><button data-act="noreq" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(item.username)+'">Avslå</button></div>').join('');
-    const roster=(g.roster||[]).map(member=>{
-      const line=escapeHtml((member.name||member.username)+' (@'+member.username+')');
-      const remove=member.username!==username&&member.role!=='admin'?'<button data-act="kick" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(member.username)+'">Fjern</button>':'';
-      return '<div class="person">'+line+remove+'</div>';
-    }).join('');
     const clearPass=g.locked?'<button data-act="clearpass" data-id="'+escapeHtml(g.id)+'">Fjern passord</button>':'';
-    admin='<div class="tools"><input data-pass="'+escapeHtml(g.id)+'" type="password" placeholder="Nytt passord"><button data-act="setpass" data-id="'+escapeHtml(g.id)+'">Lagre passord</button>'+clearPass+'</div><div class="tools"><input data-invite="'+escapeHtml(g.id)+'" placeholder="Brukernavn"><button data-act="invite" data-id="'+escapeHtml(g.id)+'">Invitér</button></div>'+reqs+roster;
+    admin='<div class="tools"><input data-pass="'+escapeHtml(g.id)+'" type="password" placeholder="Nytt passord"><button data-act="setpass" data-id="'+escapeHtml(g.id)+'">Lagre passord</button>'+clearPass+'</div><div class="tools"><input data-invite="'+escapeHtml(g.id)+'" placeholder="Brukernavn"><button data-act="invite" data-id="'+escapeHtml(g.id)+'">Invitér</button></div>'+reqs;
   }
+  const roster=(g.roster||[]).map(member=>{
+    const line=escapeHtml((member.name||member.username)+' (@'+member.username+')');
+    if(member.username===username)return '<div class="person">'+line+'</div>';
+    const blockedNow=blocked.indexOf(member.username)>=0;
+    const blockAct=blockedNow?'unblock':'block';
+    const blockLabel=blockedNow?'Opphev blokkering':'Blokker';
+    const remove=g.admin&&member.role!=='admin'?'<button data-act="kick" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(member.username)+'">Fjern</button>':'';
+    return '<div class="person">'+line+'<button data-act="'+blockAct+'" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(member.username)+'">'+blockLabel+'</button><button data-act="report" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(member.username)+'">Rapporter</button>'+remove+'</div>';
+  }).join('');
   const drop=g.admin?'Slett':'Forlat';
-  return '<div class="group"><h3>'+title+'</h3><div class="tools"><button data-act="talk" data-id="'+escapeHtml(g.id)+'">'+mic+'</button><label class="chk"><input data-act="listen" data-id="'+escapeHtml(g.id)+'" type="checkbox"'+(g.listen?' checked':'')+'> Lytt</label><button data-act="drop" data-id="'+escapeHtml(g.id)+'">'+drop+'</button></div>'+admin+people+'</div>';
+  return '<div class="group"><h3>'+title+'</h3><div class="tools"><button data-act="talk" data-id="'+escapeHtml(g.id)+'">'+mic+'</button><label class="chk"><input data-act="listen" data-id="'+escapeHtml(g.id)+'" type="checkbox"'+(g.listen?' checked':'')+'> Lytt</label><button data-act="drop" data-id="'+escapeHtml(g.id)+'">'+drop+'</button></div>'+admin+roster+people+'</div>';
 }
 function drawInvites(){
   $('invites').innerHTML=invites.map(invite=>'<div class="group"><h3>'+escapeHtml(invite.name)+'</h3><div class="hint">Fra '+escapeHtml(invite.fromName||invite.from||'')+'</div><div class="tools"><button data-act="yesinv" data-id="'+escapeHtml(invite.room)+'">Godta</button><button data-act="noinv" data-id="'+escapeHtml(invite.room)+'">Avslå</button></div></div>').join('');
@@ -138,6 +149,9 @@ function onTool(e){
   if(act==='yesinv'||act==='noinv')send({t:'inviteReply',room:id,accept:act==='yesinv'});
   if(act==='yesreq'||act==='noreq')send({t:'requestReply',room:id,username:user,accept:act==='yesreq'});
   if(act==='kick'){if(confirm('Fjerne @'+user+' fra gruppen?'))send({t:'removeMember',room:id,username:user})}
+  if(act==='block')send({t:'block',username:user});
+  if(act==='unblock')send({t:'unblock',username:user});
+  if(act==='report'){if(confirm('Rapportere @'+user+'? Rapporten lagres hos serveren. Misbruk tåles ikke.'))send({t:'report',username:user,room:id,reason:'Uakseptabel oppførsel'})}
   if(act==='setpass'||act==='clearpass'){
     const field=document.querySelector('[data-pass="'+CSS.escape(id)+'"]');
     const secret=act==='clearpass'?'':String(field?field.value:'').slice(0,80);
@@ -156,6 +170,7 @@ function applyInbox(message){
   });
   invites=message.invites||[];
   requests=message.requests||[];
+  blocked=message.blocked||[];
   if(prefer&&groups.some(g=>g.id===prefer))talk=prefer;
   prefer='';
   if(!groups.some(g=>g.id===talk))talk=groups[0]?groups[0].id:'';
@@ -179,6 +194,19 @@ function onMessage(e){
     return;
   }
   if(m.t==='inbox'){applyInbox(m);return}
+  if(m.t==='reported'){setStatus('Rapporten er sendt.');alert('Rapporten er sendt.');return}
+  if(m.t==='deleted'){
+    talking=false;
+    if($('ptt')){$('ptt').classList.remove('on');$('ptt').textContent='Hold for å snakke'}
+    clearTimeout(reconnectTimer);tok='';username='';authed=false;groups=[];invites=[];requests=[];talk='';blocked=[];
+    localStorage.removeItem('tok');
+    pending=null;
+    if(ws){ws.onclose=null;ws.close();ws=null}
+    audioOn=false;
+    show('account');
+    setStatus('Kontoen er slettet.');
+    return;
+  }
   if(m.t==='error'){
     const room=m.room||'';
     const text=m.error||'Noe gikk galt';
@@ -244,11 +272,13 @@ function beginAuth(kind){
   if(!validUser(user))return alert('Brukernavnet må være 3–20 tegn (a–z, 0–9).');
   if(password.length<4)return alert('Passordet må ha minst 4 tegn.');
   if(kind==='signup'&&!display)return alert('Skriv et navn.');
-  pending=kind==='signup'?{t:'signup',username:user,name:display,password}:{t:'login',username:user,password};
+  if(kind==='signup'&&!$('terms').checked)return alert('Du må godta vilkårene.');
+  pending=kind==='signup'?{t:'signup',username:user,name:display,password,terms:true}:{t:'login',username:user,password};
   setStatus('Kobler til…');
   if(ws&&ws.readyState===1){const message=pending;pending=null;ws.send(JSON.stringify(message))}
   else connectSocket();
 }
+$('terms').onchange=()=>{$('signup').disabled=!$('terms').checked};
 $('signup').onclick=()=>beginAuth('signup');
 $('login').onclick=()=>beginAuth('login');
 function groupPassword(){return String($('gpass').value||'').slice(0,80)}
@@ -278,7 +308,7 @@ $('ask').onclick=()=>{
 };
 function logout(){
   send({t:'logout'});
-  clearTimeout(reconnectTimer);tok='';username='';authed=false;groups=[];invites=[];requests=[];talk='';
+  clearTimeout(reconnectTimer);tok='';username='';authed=false;groups=[];invites=[];requests=[];talk='';blocked=[];
   localStorage.removeItem('tok');
   pending=null;
   if(ws){ws.onclose=null;ws.close();ws=null}
@@ -287,6 +317,10 @@ function logout(){
   setStatus('');
 }
 $('logout').onclick=logout;
+$('delete').onclick=()=>{
+  if(!confirm('Slette kontoen? Brukeren, øktene og medlemskapene slettes. Grupper du eier alene slettes. Ellers får det eldste medlemmet admin. Dette kan ikke angres.'))return;
+  send({t:'deleteAccount'});
+};
 $('go').onclick=async()=>{
   if(!groups.length)return alert('Opprett eller bli med i en gruppe.');
   ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();

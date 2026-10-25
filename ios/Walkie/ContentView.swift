@@ -133,6 +133,7 @@ struct ContentView: View {
                     Button("Logg ut", action: session.logOut)
                         .buttonStyle(.glass)
                         .frame(maxWidth: .infinity)
+                    AccountFooter(session: session)
                 }
             }
             .padding(24)
@@ -469,6 +470,9 @@ private struct GroupSheet: View {
             ScrollView {
                 GroupEditor(session: session)
                     .padding(20)
+                AccountFooter(session: session)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
             }
             .navigationTitle("Grupper")
             .toolbar {
@@ -491,6 +495,7 @@ private struct AccountGate: View {
     @State private var username = ""
     @State private var displayName = ""
     @State private var password = ""
+    @State private var acceptedTerms = false
     @FocusState private var focus: Field?
 
     private enum Field: Hashable {
@@ -554,6 +559,9 @@ private struct AccountGate: View {
                             .onSubmit { logIn() }
                             .glassFieldChrome()
                     }
+                    Toggle("Jeg godtar vilkårene", isOn: $acceptedTerms)
+                        .tint(.red)
+                    LegalLinks(server: session.serverURL)
                     Button(action: signUp) {
                         Text("Opprett konto")
                             .font(.title3.weight(.semibold))
@@ -563,7 +571,7 @@ private struct AccountGate: View {
                     .buttonStyle(.glassProminent)
                     .tint(.red)
                     .controlSize(.large)
-                    .disabled(busy)
+                    .disabled(busy || !acceptedTerms)
                     Button(action: logIn) {
                         Text("Logg inn")
                             .frame(maxWidth: .infinity)
@@ -595,7 +603,7 @@ private struct AccountGate: View {
     }
 
     private func signUp() {
-        session.signUp(username: username, displayName: displayName, password: password)
+        session.signUp(username: username, displayName: displayName, password: password, acceptedTerms: acceptedTerms)
     }
 
     private func logIn() {
@@ -766,6 +774,7 @@ private struct GroupRow: View {
             if group.admin {
                 AdminTools(session: session, group: group)
             }
+            RosterList(session: session, group: group)
             ProblemLine(text: session.joinProblem(for: group.id))
             MemberList(session: session, groupID: group.id)
             PresenceCaption(text: session.presenceCaption(for: group.id))
@@ -814,9 +823,6 @@ private struct AdminTools: View {
             }
             ForEach(pendingRequests) { request in
                 RequestRow(session: session, request: request)
-            }
-            ForEach(group.roster) { member in
-                RosterLine(session: session, groupID: group.id, member: member)
             }
         }
     }
@@ -896,21 +902,49 @@ private struct RequestRow: View {
     }
 }
 
+private struct RosterList: View {
+    @ObservedObject var session: WalkieSession
+    let group: WalkieGroup
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(group.roster) { member in
+                RosterLine(session: session, groupID: group.id, member: member, admin: group.admin)
+            }
+        }
+    }
+}
+
 private struct RosterLine: View {
     @ObservedObject var session: WalkieSession
     let groupID: String
     let member: AccountMember
+    let admin: Bool
     @State private var confirmRemove = false
+    @State private var confirmReport = false
 
     var body: some View {
-        HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(memberLine)
                 .font(.subheadline)
-            Spacer(minLength: 8)
-            if canRemove {
-                Button("Fjern") { confirmRemove = true }
-                    .buttonStyle(.glass)
+            HStack(spacing: 8) {
+                if canModerate {
+                    Button(blockTitle) { session.setBlocked(member.username, !session.isBlocked(member.username)) }
+                        .buttonStyle(.glass)
+                    Button("Rapporter") { confirmReport = true }
+                        .buttonStyle(.glass)
+                }
+                if canRemove {
+                    Button("Fjern") { confirmRemove = true }
+                        .buttonStyle(.glass)
+                }
             }
+        }
+        .alert(reportTitle, isPresented: $confirmReport) {
+            Button("Send", action: report)
+            Button("Avbryt", role: .cancel) {}
+        } message: {
+            Text("Rapporten lagres hos serveren. Misbruk tåles ikke.")
         }
         .confirmationDialog(confirmTitle, isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Fjern", role: .destructive, action: remove)
@@ -918,6 +952,14 @@ private struct RosterLine: View {
         } message: {
             Text("Medlemmet mister tilgang til gruppen.")
         }
+    }
+
+    private var reportTitle: String {
+        "Rapportere \(memberLine)?"
+    }
+
+    private var blockTitle: String {
+        session.isBlocked(member.username) ? "Opphev blokkering" : "Blokker"
     }
 
     private var confirmTitle: String {
@@ -930,11 +972,62 @@ private struct RosterLine: View {
     }
 
     private var canRemove: Bool {
-        member.username != session.accountUsername && member.role != "admin"
+        admin && member.username != session.accountUsername && member.role != "admin"
+    }
+
+    private var canModerate: Bool {
+        member.username != session.accountUsername
     }
 
     private func remove() {
         session.removeMember(room: groupID, username: member.username)
+    }
+
+    private func report() {
+        session.report(username: member.username, room: groupID)
+    }
+}
+
+private struct LegalLinks: View {
+    let server: String
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Button("Personvern") { open("/personvern") }
+            Button("Vilkår") { open("/vilkar") }
+        }
+        .buttonStyle(.plain)
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(.red)
+    }
+
+    private func open(_ path: String) {
+        guard let url = WalkieSession.webPage(path, server: server) else { return }
+        UIApplication.shared.open(url)
+    }
+}
+
+private struct AccountFooter: View {
+    @ObservedObject var session: WalkieSession
+    @State private var confirmDelete = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Konto")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            LegalLinks(server: session.serverURL)
+            Button("Slett konto") { confirmDelete = true }
+                .buttonStyle(.glass)
+                .tint(.red)
+                .frame(maxWidth: .infinity)
+        }
+        .confirmationDialog("Slette kontoen?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Slett konto", role: .destructive) { session.deleteAccount() }
+            Button("Avbryt", role: .cancel) {}
+        } message: {
+            Text("Brukeren, øktene og medlemskapene slettes. Grupper du eier alene slettes. Ellers får det eldste medlemmet admin. Dette kan ikke angres.")
+        }
     }
 }
 

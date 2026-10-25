@@ -41,12 +41,22 @@ function isLocked(group) {
   return !!(group && group.salt && group.hash);
 }
 
+function stampMember(groupId, userId, role) {
+  return { groupId, userId, role, joinedAt: Date.now() };
+}
+
+function oldestOther(members, userId) {
+  return members
+    .filter((member) => member.userId !== userId)
+    .sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0) || String(a.userId).localeCompare(String(b.userId)))[0];
+}
+
 class JsonStore {
   constructor(file) {
     this.kind = 'json';
     this.file = file;
     this.chain = Promise.resolve();
-    this.data = { users: [], sessions: [], groups: [], members: [], invites: [], requests: [] };
+    this.data = { users: [], sessions: [], groups: [], members: [], invites: [], requests: [], blocks: [], reports: [] };
   }
 
   async open() {
@@ -132,7 +142,7 @@ class JsonStore {
         group.hash = secret.hash;
       }
       this.data.groups.push(group);
-      this.data.members.push({ groupId: roomId, userId: ownerId, role: 'admin' });
+      this.data.members.push(stampMember(roomId, ownerId, 'admin'));
       this.save();
     });
   }
@@ -216,7 +226,7 @@ class JsonStore {
       if (!invite) throw new StoreError('Fant ikke invitasjonen');
       this.data.invites = this.data.invites.filter((item) => item !== invite);
       if (accept && !this.data.members.some((member) => member.groupId === groupId && member.userId === userId)) {
-        this.data.members.push({ groupId, userId, role: 'member' });
+        this.data.members.push(stampMember(groupId, userId, 'member'));
       }
       this.save();
     });
@@ -250,7 +260,7 @@ class JsonStore {
       if (!secretMatches(password, group)) throw new StoreError('Feil passord');
       this.data.invites = this.data.invites.filter((invite) => !(invite.groupId === groupId && invite.userId === userId));
       this.data.requests = this.data.requests.filter((request) => !(request.groupId === groupId && request.userId === userId));
-      this.data.members.push({ groupId, userId, role: 'member' });
+      this.data.members.push(stampMember(groupId, userId, 'member'));
       this.save();
     });
   }
@@ -279,7 +289,7 @@ class JsonStore {
       if (!user) throw new StoreError('Fant ikke brukeren');
       this.data.requests = this.data.requests.filter((request) => !(request.groupId === groupId && request.userId === user.id));
       if (accept && !this.data.members.some((member) => member.groupId === groupId && member.userId === user.id)) {
-        this.data.members.push({ groupId, userId: user.id, role: 'member' });
+        this.data.members.push(stampMember(groupId, user.id, 'member'));
       }
       this.save();
     });
@@ -326,6 +336,91 @@ class JsonStore {
     const member = this.data.members.find((item) => item.groupId === groupId && item.userId === userId && item.role === 'admin');
     if (!member) throw new StoreError('Du er ikke admin');
   }
+
+  block(userId, username) {
+    return this.enqueue(async () => {
+      const user = this.data.users.find((item) => item.username === username);
+      if (!user) throw new StoreError('Fant ikke brukeren');
+      if (user.id === userId) throw new StoreError('Du kan ikke blokkere deg selv.');
+      if (!this.data.blocks.some((item) => item.userId === userId && item.blockedId === user.id)) {
+        this.data.blocks.push({ userId, blockedId: user.id });
+        this.save();
+      }
+    });
+  }
+
+  unblock(userId, username) {
+    return this.enqueue(async () => {
+      const user = this.data.users.find((item) => item.username === username);
+      if (!user) throw new StoreError('Fant ikke brukeren');
+      this.data.blocks = this.data.blocks.filter((item) => !(item.userId === userId && item.blockedId === user.id));
+      this.save();
+    });
+  }
+
+  blockedIds(userId) {
+    return this.enqueue(async () => this.data.blocks.filter((item) => item.userId === userId).map((item) => item.blockedId));
+  }
+
+  blockedUsernames(userId) {
+    return this.enqueue(async () => this.data.blocks.filter((item) => item.userId === userId).map((item) => {
+      const user = this.data.users.find((entry) => entry.id === item.blockedId);
+      return user ? user.username : '';
+    }).filter(Boolean));
+  }
+
+  report(reporterId, username, room, reason) {
+    return this.enqueue(async () => {
+      const target = this.data.users.find((item) => item.username === username);
+      if (!target) throw new StoreError('Fant ikke brukeren');
+      if (target.id === reporterId) throw new StoreError('Du kan ikke rapportere deg selv.');
+      const reporter = this.data.users.find((item) => item.id === reporterId);
+      const entry = {
+        id: newId(),
+        reporterId,
+        reporter: reporter ? reporter.username : '',
+        targetId: target.id,
+        targetUsername: target.username,
+        room: room || '',
+        reason: String(reason || 'Ingen begrunnelse').slice(0, 500),
+        createdAt: Date.now()
+      };
+      this.data.reports.push(entry);
+      this.save();
+      console.log('report ' + JSON.stringify({ target: entry.targetUsername, room: entry.room, reason: entry.reason }));
+    });
+  }
+
+  deleteAccount(userId) {
+    return this.enqueue(async () => {
+      const rooms = new Set();
+      const adminGroups = this.data.members.filter((member) => member.userId === userId && member.role === 'admin').map((member) => member.groupId);
+      for (const groupId of adminGroups) {
+        rooms.add(groupId);
+        const others = this.data.members.filter((member) => member.groupId === groupId);
+        const next = oldestOther(others, userId);
+        if (!next) {
+          this.data.groups = this.data.groups.filter((group) => group.id !== groupId);
+          this.data.members = this.data.members.filter((member) => member.groupId !== groupId);
+          this.data.invites = this.data.invites.filter((invite) => invite.groupId !== groupId);
+          this.data.requests = this.data.requests.filter((request) => request.groupId !== groupId);
+        } else {
+          next.role = 'admin';
+          const group = this.data.groups.find((item) => item.id === groupId);
+          if (group) group.ownerId = next.userId;
+        }
+      }
+      this.data.members.filter((member) => member.userId === userId).forEach((member) => rooms.add(member.groupId));
+      this.data.members = this.data.members.filter((member) => member.userId !== userId);
+      this.data.invites = this.data.invites.filter((invite) => invite.userId !== userId && invite.fromId !== userId);
+      this.data.requests = this.data.requests.filter((request) => request.userId !== userId);
+      this.data.sessions = this.data.sessions.filter((session) => session.userId !== userId);
+      this.data.blocks = this.data.blocks.filter((item) => item.userId !== userId && item.blockedId !== userId);
+      this.data.users = this.data.users.filter((user) => user.id !== userId);
+      this.save();
+      return [...rooms];
+    });
+  }
 }
 
 class PgStore {
@@ -360,7 +455,24 @@ class PgStore {
         group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
         user_id TEXT NOT NULL REFERENCES users(id),
         role TEXT NOT NULL,
+        joined_at BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (group_id, user_id)
+      );
+      ALTER TABLE members ADD COLUMN IF NOT EXISTS joined_at BIGINT NOT NULL DEFAULT 0;
+      CREATE TABLE IF NOT EXISTS blocks (
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        blocked_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        PRIMARY KEY (user_id, blocked_id)
+      );
+      CREATE TABLE IF NOT EXISTS reports (
+        id TEXT PRIMARY KEY,
+        reporter_id TEXT,
+        reporter TEXT,
+        target_id TEXT,
+        target_username TEXT NOT NULL,
+        room TEXT,
+        reason TEXT,
+        created_at BIGINT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS invites (
         group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
@@ -429,7 +541,10 @@ class PgStore {
         'INSERT INTO groups (id, name, owner_id, salt, hash) VALUES ($1, $2, $3, $4, $5)',
         [roomId, name, ownerId, secret ? secret.salt : null, secret ? secret.hash : null]
       );
-      await client.query('INSERT INTO members (group_id, user_id, role) VALUES ($1, $2, $3)', [roomId, ownerId, 'admin']);
+      await client.query(
+        'INSERT INTO members (group_id, user_id, role, joined_at) VALUES ($1, $2, $3, $4)',
+        [roomId, ownerId, 'admin', Date.now()]
+      );
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
@@ -527,9 +642,9 @@ class PgStore {
       if (!invite.rowCount) throw new StoreError('Fant ikke invitasjonen');
       if (accept) {
         await client.query(
-          `INSERT INTO members (group_id, user_id, role) VALUES ($1, $2, 'member')
+          `INSERT INTO members (group_id, user_id, role, joined_at) VALUES ($1, $2, 'member', $3)
            ON CONFLICT DO NOTHING`,
-          [groupId, userId]
+          [groupId, userId, Date.now()]
         );
       }
       await client.query('COMMIT');
@@ -565,8 +680,8 @@ class PgStore {
     await this.pool.query('DELETE FROM invites WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
     await this.pool.query('DELETE FROM requests WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
     await this.pool.query(
-      `INSERT INTO members (group_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING`,
-      [groupId, userId]
+      `INSERT INTO members (group_id, user_id, role, joined_at) VALUES ($1, $2, 'member', $3) ON CONFLICT DO NOTHING`,
+      [groupId, userId, Date.now()]
     );
   }
 
@@ -590,8 +705,8 @@ class PgStore {
       await client.query('DELETE FROM requests WHERE group_id = $1 AND user_id = $2', [groupId, user.id]);
       if (accept) {
         await client.query(
-          `INSERT INTO members (group_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING`,
-          [groupId, user.id]
+          `INSERT INTO members (group_id, user_id, role, joined_at) VALUES ($1, $2, 'member', $3) ON CONFLICT DO NOTHING`,
+          [groupId, user.id, Date.now()]
         );
       }
       await client.query('COMMIT');
@@ -641,6 +756,93 @@ class PgStore {
     const row = result.rows[0];
     if (!row) return null;
     return { id: row.id, username: row.username, displayName: row.display_name };
+  }
+
+  async block(userId, username) {
+    const user = await this.userByUsername(username);
+    if (!user) throw new StoreError('Fant ikke brukeren');
+    if (user.id === userId) throw new StoreError('Du kan ikke blokkere deg selv.');
+    await this.pool.query(
+      'INSERT INTO blocks (user_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [userId, user.id]
+    );
+  }
+
+  async unblock(userId, username) {
+    const user = await this.userByUsername(username);
+    if (!user) throw new StoreError('Fant ikke brukeren');
+    await this.pool.query('DELETE FROM blocks WHERE user_id = $1 AND blocked_id = $2', [userId, user.id]);
+  }
+
+  async blockedIds(userId) {
+    const result = await this.pool.query('SELECT blocked_id FROM blocks WHERE user_id = $1', [userId]);
+    return result.rows.map((row) => row.blocked_id);
+  }
+
+  async blockedUsernames(userId) {
+    const result = await this.pool.query(
+      `SELECT u.username FROM blocks b JOIN users u ON u.id = b.blocked_id WHERE b.user_id = $1`,
+      [userId]
+    );
+    return result.rows.map((row) => row.username);
+  }
+
+  async report(reporterId, username, room, reason) {
+    const target = await this.userByUsername(username);
+    if (!target) throw new StoreError('Fant ikke brukeren');
+    if (target.id === reporterId) throw new StoreError('Du kan ikke rapportere deg selv.');
+    const reporter = await this.pool.query('SELECT username FROM users WHERE id = $1', [reporterId]);
+    const text = String(reason || 'Ingen begrunnelse').slice(0, 500);
+    await this.pool.query(
+      `INSERT INTO reports (id, reporter_id, reporter, target_id, target_username, room, reason, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [newId(), reporterId, reporter.rows[0] ? reporter.rows[0].username : '', target.id, target.username, room || '', text, Date.now()]
+    );
+    console.log('report ' + JSON.stringify({ target: target.username, room: room || '', reason: text }));
+  }
+
+  async deleteAccount(userId) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const adminGroups = await client.query(
+        `SELECT group_id FROM members WHERE user_id = $1 AND role = 'admin'`,
+        [userId]
+      );
+      const rooms = new Set(adminGroups.rows.map((row) => row.group_id));
+      for (const row of adminGroups.rows) {
+        const next = await client.query(
+          `SELECT user_id FROM members WHERE group_id = $1 AND user_id <> $2
+           ORDER BY joined_at ASC, user_id ASC LIMIT 1`,
+          [row.group_id, userId]
+        );
+        if (!next.rowCount) {
+          await client.query('DELETE FROM groups WHERE id = $1', [row.group_id]);
+        } else {
+          const heir = next.rows[0].user_id;
+          await client.query(
+            `UPDATE members SET role = 'admin' WHERE group_id = $1 AND user_id = $2`,
+            [row.group_id, heir]
+          );
+          await client.query('UPDATE groups SET owner_id = $2 WHERE id = $1', [row.group_id, heir]);
+        }
+      }
+      const memberships = await client.query('SELECT group_id FROM members WHERE user_id = $1', [userId]);
+      memberships.rows.forEach((row) => rooms.add(row.group_id));
+      await client.query('DELETE FROM members WHERE user_id = $1', [userId]);
+      await client.query('DELETE FROM invites WHERE user_id = $1 OR from_id = $1', [userId]);
+      await client.query('DELETE FROM requests WHERE user_id = $1', [userId]);
+      await client.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+      await client.query('DELETE FROM blocks WHERE user_id = $1 OR blocked_id = $1', [userId]);
+      await client.query('DELETE FROM users WHERE id = $1', [userId]);
+      await client.query('COMMIT');
+      return [...rooms];
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch {}
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 
