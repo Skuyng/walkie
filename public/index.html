@@ -6,7 +6,7 @@ input,button{font-size:18px;padding:12px;border-radius:10px;border:0;margin:6px;
 .row{display:flex;gap:8px;justify-content:center;width:86%;margin:0 auto}
 .row button{width:auto;flex:1}
 #ptt{width:220px;height:220px;border-radius:50%;background:#c22;color:#fff;font-size:26px;margin:24px auto;display:block;-webkit-touch-callout:none;touch-action:none}
-#ptt.on{background:#2c2}#who{font-size:20px;min-height:28px;color:#fc0}#chat{display:none}
+#ptt.on{background:#2c2}#who{font-size:20px;min-height:28px;color:#fc0}
 .group{text-align:left;background:#1c1c1c;border-radius:12px;padding:10px 12px;margin:8px auto;width:86%}
 .group h3{margin:0 0 6px;font-size:18px}
 .person{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:16px}
@@ -14,53 +14,64 @@ input,button{font-size:18px;padding:12px;border-radius:10px;border:0;margin:6px;
 .person.talk{color:#fc0;font-weight:700}
 .bad{color:#f66;font-weight:700;margin:4px 0}
 .tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:15px}
-.tools button{width:auto;margin:0;padding:8px 10px}
+.tools button,.tools input{width:auto;margin:0;padding:8px 10px}
+.tools input{flex:1;min-width:120px}
 label.chk{display:flex;align-items:center;gap:6px}
+.hint{color:#aaa;font-size:15px}
 </style></head><body>
-<div id="login"><h1>📻 Walkie-Talkie</h1>
-<input id="name" placeholder="Ditt navn">
+<div id="account"><h1>📻 Walkie-Talkie</h1>
+<p class="hint">Logg inn, eller opprett en konto.</p>
+<input id="username" placeholder="Brukernavn" autocapitalize="none" autocomplete="username">
+<input id="display" placeholder="Visningsnavn (ved ny konto)" autocomplete="name">
+<input id="password" type="password" placeholder="Passord (minst 4 tegn)" autocomplete="current-password">
+<div class="row"><button id="signup" type="button">Opprett konto</button><button id="login" type="button">Logg inn</button></div>
+<p id="accountStatus" class="hint"></p></div>
+<div id="home" style="display:none"><h1>📻 Walkie-Talkie</h1>
+<p id="whoami" class="hint"></p>
 <input id="gname" placeholder="Gruppenavn (f.eks. Familie)">
-<input id="gpass" type="password" placeholder="Passord (valgfritt)">
-<div class="row"><button id="create" type="button">Opprett gruppe</button><button id="enter" type="button">Bli med i gruppe</button></div>
-<div id="localGroups"></div>
-<button id="go">Koble til</button></div>
-<div id="chat"><div id="status">Kobler til…</div><div id="liveGroups"></div><button id="ptt">Hold for å snakke</button><div id="who"></div></div>
+<div class="row"><button id="create" type="button">Opprett gruppe</button><button id="ask" type="button">Be om å bli med</button></div>
+<div id="invites"></div>
+<div id="groups"></div>
+<button id="go">Koble til</button>
+<button id="logout" type="button">Logg ut</button></div>
+<div id="chat" style="display:none"><div id="status">Kobler til…</div><div id="liveGroups"></div><button id="ptt">Hold for å snakke</button><div id="who"></div><button id="hangup" type="button">Koble fra</button></div>
 <script>
 const $=id=>document.getElementById(id);
 const RATE=16000;
-let groups=loadGroups();
-let passwords=loadPass('gpw');
+let tok=localStorage.tok||'';
+let username=localStorage.user||'';
+let myName=localStorage.name||'';
+let groups=[];
+let invites=[];
+let requests=[];
 let talk=localStorage.talk||'';
+let listenMap=loadListen();
 let members={};
 let speakers={};
 let problems={};
 let myId='';
-let ws,ctx,stream,proc,src,talking=false,playT=0,myName='';
-$('name').value=localStorage.n||'';
-function loadGroups(){try{const v=JSON.parse(localStorage.groups||'[]');return Array.isArray(v)?v:[]}catch{return[]}}
-function loadPass(key){try{const v=JSON.parse(localStorage[key]||'{}');return v&&typeof v==='object'?v:{}}catch{return{}}}
-function saveLocal(){localStorage.groups=JSON.stringify(groups);localStorage.gpw=JSON.stringify(passwords);localStorage.talk=talk}
+let prefer='';
+let authed=false;
+let pending=null;
+let audioOn=false;
+let ws,ctx,stream,proc,src,talking=false,playT=0,reconnectTimer=0;
+$('username').value=username;
+$('display').value=myName;
+function loadListen(){try{const v=JSON.parse(localStorage.listen||'{}');return v&&typeof v==='object'?v:{}}catch{return{}}}
 function roomId(value){return String(value||'').trim().toLowerCase().slice(0,40)}
-function clipName(value){return String(value||'').trim().slice(0,40)}
-function upsert(name,password,create){
-  const label=clipName(name);const id=roomId(label);
-  if(!id)return alert('Skriv et gruppenavn');
-  const secret=String(password||'').slice(0,80);
-  let found=groups.find(g=>g.id===id);
-  if(!found){found={id,name:label,listen:true,setsPassword:false};groups.push(found)}
-  else found.name=label;
-  found.listen=true;
-  if(secret){passwords[id]=secret;found.setsPassword=create||found.setsPassword}
-  else if(create) found.setsPassword=false;
-  if(!talk)talk=id;
-  if(create)talk=id;
-  saveLocal();render();
-  if(ws&&ws.readyState===1)sendState();
-}
-function render(){
-  $('localGroups').innerHTML=groups.map(drawGroup).join('')||'<p>Ingen grupper ennå.</p>';
-  if($('liveGroups'))$('liveGroups').innerHTML=groups.map(drawGroup).join('');
-  document.querySelectorAll('[data-act]').forEach(el=>el.onclick=onTool);
+function userId(value){return String(value||'').trim().toLowerCase().slice(0,20)}
+function validUser(value){return /^[a-z0-9._-]{3,20}$/.test(value)}
+function escapeHtml(value){return String(value).replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]))}
+function show(id){['account','home','chat'].forEach(name=>{$(name).style.display=name===id?'block':'none'})}
+function setStatus(text){if($('status'))$('status').textContent=text;if($('accountStatus'))$('accountStatus').textContent=text}
+function send(message){if(ws&&ws.readyState===1)ws.send(JSON.stringify(message))}
+function sendSubscribe(){
+  if(!authed)return;
+  const muted=groups.filter(g=>!g.listen).map(g=>g.id);
+  send({t:'subscribe',talk,muted});
+  localStorage.talk=talk;
+  const map={};groups.forEach(g=>{map[g.id]=!!g.listen});
+  localStorage.listen=JSON.stringify(map);
 }
 function peopleFor(g){
   const list=(members[g.id]||[]).map(person=>({id:String(person.id),name:String(person.name||'')}));
@@ -75,7 +86,7 @@ function peopleFor(g){
   return list;
 }
 function drawGroup(g){
-  const online=ws&&ws.readyState===1;
+  const online=ws&&ws.readyState===1&&audioOn;
   const problem=problems[g.id]?'<div class="bad">'+escapeHtml(problems[g.id])+'</div>':'';
   const rows=peopleFor(g).map(person=>{
     const hot=(speakers[g.id]&&speakers[g.id][person.id])||(talking&&g.id===talk&&(person.id===myId||(!myId&&person.name===myName)));
@@ -83,26 +94,117 @@ function drawGroup(g){
   }).join('');
   const people=online?(problem+(rows||(problem?'':'<div class="person">Ingen pålogget</div>'))):problem;
   const mic=g.id===talk?'Snakk':'Velg';
-  return '<div class="group"><h3>'+escapeHtml(g.name)+(passwords[g.id]?' 🔒':'')+'</h3><div class="tools"><button data-act="talk" data-id="'+g.id+'">'+mic+'</button><label class="chk"><input data-act="listen" data-id="'+g.id+'" type="checkbox"'+(g.listen?' checked':'')+'> Lytt</label><button data-act="drop" data-id="'+g.id+'">Fjern</button></div>'+people+'</div>';
+  const title=escapeHtml(g.name)+(g.admin?' · admin':'');
+  let admin='';
+  if(g.admin){
+    const reqs=(requests||[]).filter(item=>item.room===g.id).map(item=>'<div class="tools"><span>'+escapeHtml(item.displayName||item.username)+'</span><button data-act="yesreq" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(item.username)+'">Godta</button><button data-act="noreq" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(item.username)+'">Avslå</button></div>').join('');
+    const roster=(g.roster||[]).map(member=>{
+      const line=escapeHtml((member.name||member.username)+' (@'+member.username+')');
+      const remove=member.username!==username&&member.role!=='admin'?'<button data-act="kick" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(member.username)+'">Fjern</button>':'';
+      return '<div class="person">'+line+remove+'</div>';
+    }).join('');
+    admin='<div class="tools"><input data-invite="'+escapeHtml(g.id)+'" placeholder="Brukernavn"><button data-act="invite" data-id="'+escapeHtml(g.id)+'">Invitér</button></div>'+reqs+roster;
+  }
+  const drop=g.admin?'Slett':'Forlat';
+  return '<div class="group"><h3>'+title+'</h3><div class="tools"><button data-act="talk" data-id="'+escapeHtml(g.id)+'">'+mic+'</button><label class="chk"><input data-act="listen" data-id="'+escapeHtml(g.id)+'" type="checkbox"'+(g.listen?' checked':'')+'> Lytt</label><button data-act="drop" data-id="'+escapeHtml(g.id)+'">'+drop+'</button></div>'+admin+people+'</div>';
 }
-function escapeHtml(value){return String(value).replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]))}
+function drawInvites(){
+  $('invites').innerHTML=invites.map(invite=>'<div class="group"><h3>'+escapeHtml(invite.name)+'</h3><div class="hint">Fra '+escapeHtml(invite.fromName||invite.from||'')+'</div><div class="tools"><button data-act="yesinv" data-id="'+escapeHtml(invite.room)+'">Godta</button><button data-act="noinv" data-id="'+escapeHtml(invite.room)+'">Avslå</button></div></div>').join('');
+}
+function render(){
+  drawInvites();
+  const html=groups.map(drawGroup).join('')||'<p class="hint">Ingen grupper ennå.</p>';
+  $('groups').innerHTML=html;
+  if($('liveGroups'))$('liveGroups').innerHTML=groups.map(drawGroup).join('');
+  document.querySelectorAll('[data-act]').forEach(el=>el.onclick=onTool);
+  $('whoami').textContent=myName?myName+' (@'+username+')':'@'+username;
+}
 function onTool(e){
   const id=e.currentTarget.getAttribute('data-id');
   const act=e.currentTarget.getAttribute('data-act');
-  const group=groups.find(g=>g.id===id);if(!group)return;
-  if(act==='talk')talk=id;
-  if(act==='listen')group.listen=e.currentTarget.checked;
-  if(act==='drop'){groups=groups.filter(g=>g.id!==id);delete passwords[id];if(talk===id)talk=groups[0]?groups[0].id:'';}
-  saveLocal();render();
-  if(ws&&ws.readyState===1)sendState();
+  const user=e.currentTarget.getAttribute('data-user')||'';
+  const group=groups.find(g=>g.id===id);
+  if(act==='talk'&&group){talk=id;sendSubscribe()}
+  if(act==='listen'&&group){group.listen=e.currentTarget.checked;sendSubscribe()}
+  if(act==='drop'&&group){send(group.admin?{t:'deleteGroup',room:id}:{t:'leave',room:id})}
+  if(act==='invite'){
+    const field=document.querySelector('[data-invite="'+CSS.escape(id)+'"]');
+    const who=userId(field?field.value:'');
+    if(!validUser(who))return alert('Skriv et brukernavn.');
+    send({t:'invite',room:id,username:who});
+  }
+  if(act==='yesinv'||act==='noinv')send({t:'inviteReply',room:id,accept:act==='yesinv'});
+  if(act==='yesreq'||act==='noreq')send({t:'requestReply',room:id,username:user,accept:act==='yesreq'});
+  if(act==='kick')send({t:'removeMember',room:id,username:user});
+  render();
 }
-function payload(){
-  return {t:'groups',name:myName,talk,groups:groups.map(g=>({room:g.id,password:passwords[g.id]||'',create:!!g.setsPassword,listen:!!g.listen}))};
+function applyInbox(message){
+  const previous=groups;
+  groups=(message.groups||[]).map(item=>{
+    const old=previous.find(g=>g.id===item.id);
+    const listen=old?!!old.listen:listenMap[item.id]!==false;
+    return {id:item.id,name:item.name||item.id,admin:!!item.admin,listen,roster:item.members||[]};
+  });
+  invites=message.invites||[];
+  requests=message.requests||[];
+  if(prefer&&groups.some(g=>g.id===prefer))talk=prefer;
+  prefer='';
+  if(!groups.some(g=>g.id===talk))talk=groups[0]?groups[0].id:'';
+  render();
+  sendSubscribe();
 }
-function sendState(){
-  if(!ws||ws.readyState!==1)return;
-  ws.send(JSON.stringify(payload()));
-  if(talk)ws.send(JSON.stringify({t:'join',name:myName,room:talk,password:passwords[talk]||''}));
+function onMessage(e){
+  if(typeof e.data!=='string')return play(e.data);
+  const m=JSON.parse(e.data);
+  if(m.t==='session'){
+    tok=m.token||tok;
+    username=m.username||username;
+    myName=m.name||myName;
+    localStorage.tok=tok;
+    localStorage.user=username;
+    localStorage.name=myName;
+    authed=true;
+    setStatus('Innlogget');
+    if(!audioOn)show('home');
+    render();
+    return;
+  }
+  if(m.t==='inbox'){applyInbox(m);return}
+  if(m.t==='error'){
+    const room=m.room||'';
+    const text=m.error||'Noe gikk galt';
+    if(!authed){
+      if(text==='Logg inn')localStorage.removeItem('tok');
+      tok=localStorage.tok||'';
+      authed=false;
+      show('account');
+      setStatus(text==='Logg inn'?'Logg inn på nytt.':text);
+      return;
+    }
+    if(room)problems[room]=text;
+    alert((room?((groups.find(g=>g.id===room)||{name:room}).name+': '):'')+text);
+    render();
+    return;
+  }
+  if(m.t==='users'){
+    const room=m.room||talk;
+    if(m.self)myId=m.self;
+    const list=Array.isArray(m.members)&&m.members.length
+      ?m.members.map((person,index)=>({id:String(person.id||index),name:String(person.name||'')})).filter(person=>person.name)
+      :(Array.isArray(m.users)?m.users:[]).map((name,index)=>({id:index+'|'+name,name:String(name)}));
+    members[room]=list;
+    const here=myId?list.some(person=>person.id===myId):list.some(person=>person.name===myName);
+    if(here)delete problems[room];
+    else if(room)problems[room]=problems[room]||'Ikke medlem';
+    render();
+  }
+  if(m.t==='start'||m.t==='stop'){
+    const room=m.room||talk;
+    const id=m.id||m.name;
+    speakers[room]=speakers[room]||{};
+    if(m.t==='start')speakers[room][id]=m.name;else delete speakers[room][id];
+    whoText();render();
+  }
 }
 function whoText(){
   const lines=[];
@@ -114,61 +216,78 @@ function whoText(){
   });
   $('who').textContent=lines.length?lines.join(' · ')+' snakker':'';
 }
-$('create').onclick=()=>upsert($('gname').value,$('gpass').value,true);
-$('enter').onclick=()=>upsert($('gname').value,$('gpass').value,false);
-render();
+function connectSocket(){
+  if(ws&&(ws.readyState===0||ws.readyState===1))return;
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host);
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{
+    if(pending){const message=pending;pending=null;ws.send(JSON.stringify(message));return}
+    if(tok)ws.send(JSON.stringify({t:'resume',token:tok}));
+  };
+  ws.onclose=()=>{const again=!!(tok||pending||authed);setStatus(again?'Frakoblet – prøver igjen…':'Ikke tilkoblet');if(again)reconnectTimer=setTimeout(connectSocket,2000)};
+  ws.onmessage=onMessage;
+}
+function beginAuth(kind){
+  const user=userId($('username').value);
+  const display=String($('display').value||'').trim().slice(0,30);
+  const password=String($('password').value||'').slice(0,80);
+  if(!validUser(user))return alert('Brukernavnet må være 3–20 tegn (a–z, 0–9).');
+  if(password.length<4)return alert('Passordet må ha minst 4 tegn.');
+  if(kind==='signup'&&!display)return alert('Skriv et navn.');
+  pending=kind==='signup'?{t:'signup',username:user,name:display,password}:{t:'login',username:user,password};
+  setStatus('Kobler til…');
+  if(ws&&ws.readyState===1){const message=pending;pending=null;ws.send(JSON.stringify(message))}
+  else connectSocket();
+}
+$('signup').onclick=()=>beginAuth('signup');
+$('login').onclick=()=>beginAuth('login');
+$('create').onclick=()=>{
+  const label=String($('gname').value||'').trim().slice(0,30);
+  if(!label)return alert('Skriv et gruppenavn.');
+  prefer=roomId(label);
+  send({t:'createGroup',name:label});
+  $('gname').value='';
+};
+$('ask').onclick=()=>{
+  const label=String($('gname').value||'').trim().slice(0,30);
+  if(!label)return alert('Skriv et gruppenavn.');
+  send({t:'requestJoin',name:label});
+  $('gname').value='';
+};
+function logout(){
+  send({t:'logout'});
+  clearTimeout(reconnectTimer);tok='';username='';authed=false;groups=[];invites=[];requests=[];talk='';
+  localStorage.removeItem('tok');
+  pending=null;
+  if(ws){ws.onclose=null;ws.close();ws=null}
+  audioOn=false;talking=false;
+  show('account');
+  setStatus('');
+}
+$('logout').onclick=logout;
 $('go').onclick=async()=>{
-  myName=$('name').value.trim().slice(0,30);
-  if(!myName)return alert('Skriv inn navn');
-  if(!groups.length||!talk)return alert('Opprett eller bli med i en gruppe');
-  localStorage.n=myName;saveLocal();
-  ctx=new (window.AudioContext||window.webkitAudioContext)();await ctx.resume();
+  if(!groups.length)return alert('Opprett eller bli med i en gruppe.');
+  ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();
+  await ctx.resume();
   try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}})}catch(e){return alert('Fikk ikke tilgang til mikrofonen. Tillat mikrofon i Safari.')}
+  if(proc)proc.onaudioprocess=null;
   src=ctx.createMediaStreamSource(stream);proc=ctx.createScriptProcessor(4096,1,1);const mute=ctx.createGain();mute.gain.value=0;
   src.connect(proc);proc.connect(mute);mute.connect(ctx.destination);
   proc.onaudioprocess=e=>{if(!talking||!ws||ws.readyState!==1)return;const i=e.inputBuffer.getChannelData(0),ratio=ctx.sampleRate/RATE,len=Math.floor(i.length/ratio),o=new Int16Array(len);
   for(let k=0;k<len;k++){const s=Math.max(-1,Math.min(1,i[Math.floor(k*ratio)]));o[k]=s*32767}ws.send(o.buffer)};
-  $('login').style.display='none';$('chat').style.display='block';connect()};
-function connect(){
-  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host);ws.binaryType='arraybuffer';
-  ws.onopen=()=>{$('status').textContent='🟢 Tilkoblet';sendState()};
-  ws.onclose=()=>{$('status').textContent='🔴 Frakoblet – prøver igjen…';setTimeout(connect,2000)};
-  ws.onmessage=e=>{
-    if(typeof e.data!=='string')return play(e.data);
-    const m=JSON.parse(e.data);
-    if(m.t==='error'){
-      const room=m.room||talk;
-      const text=m.error||'Feil passord';
-      if(room)problems[room]=text;
-      alert((room?((groups.find(g=>g.id===room)||{name:room}).name+': '):'')+text);
-      render();
-      return;
-    }
-    if(m.t==='users'){
-      const room=m.room||talk;
-      if(m.self)myId=m.self;
-      const list=Array.isArray(m.members)&&m.members.length
-        ?m.members.map((person,index)=>({id:String(person.id||index),name:String(person.name||'')})).filter(person=>person.name)
-        :(Array.isArray(m.users)?m.users:[]).map((name,index)=>({id:index+'|'+name,name:String(name)}));
-      members[room]=list;
-      const here=myId?list.some(person=>person.id===myId):list.some(person=>person.name===myName);
-      if(here)delete problems[room];
-      else if(room)problems[room]=problems[room]||'Ikke med i gruppen';
-      render();
-    }
-    if(m.t==='start'||m.t==='stop'){
-      const room=m.room||talk;
-      const id=m.id||m.name;
-      speakers[room]=speakers[room]||{};
-      if(m.t==='start')speakers[room][id]=m.name;else delete speakers[room][id];
-      whoText();render();
-    }
-  };
-}
-function play(buf){const d=new Int16Array(buf),b=ctx.createBuffer(1,d.length,RATE),c=b.getChannelData(0);for(let k=0;k<d.length;k++)c[k]=d[k]/32768;
+  audioOn=true;show('chat');setStatus('🟢 Tilkoblet');sendSubscribe();
+};
+$('hangup').onclick=()=>{
+  talking=false;audioOn=false;
+  if(stream)stream.getTracks().forEach(track=>track.stop());
+  stream=null;proc=null;src=null;
+  show('home');render();
+};
+function play(buf){if(!ctx)return;const d=new Int16Array(buf),b=ctx.createBuffer(1,d.length,RATE),c=b.getChannelData(0);for(let k=0;k<d.length;k++)c[k]=d[k]/32768;
 const s=ctx.createBufferSource();s.buffer=b;s.connect(ctx.destination);const now=ctx.currentTime;if(playT<now)playT=now+0.14;s.start(playT);playT+=b.duration}
 function down(e){e.preventDefault();if(talking||!talk)return;ctx.resume();talking=true;$('ptt').classList.add('on');$('ptt').textContent='Snakker…';render();ws&&ws.readyState===1&&ws.send(JSON.stringify({t:'start',room:talk}))}
 function up(e){e.preventDefault();if(!talking)return;talking=false;$('ptt').classList.remove('on');$('ptt').textContent='Hold for å snakke';render();ws&&ws.readyState===1&&ws.send(JSON.stringify({t:'stop',room:talk}))}
 const p=$('ptt');p.addEventListener('touchstart',down,{passive:false});p.addEventListener('touchend',up);p.addEventListener('touchcancel',up);p.addEventListener('mousedown',down);addEventListener('mouseup',up);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&ctx)ctx.resume()});
+if(tok){setStatus('Logger inn…');connectSocket()}
 </script></body></html>

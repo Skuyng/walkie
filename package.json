@@ -16,6 +16,7 @@
   "type": "commonjs",
   "dependencies": {
     "localtunnel": "^2.0.2",
+    "pg": "^8.23.1",
     "tunnelmole": "^2.4.0",
     "ws": "^8.22.0"
   }

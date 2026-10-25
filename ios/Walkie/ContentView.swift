@@ -11,16 +11,18 @@ struct ContentView: View {
     @State private var showGroups = false
 
     private enum Field: Hashable {
-        case name, server
+        case server
     }
 
     var body: some View {
         ZStack {
             WalkieBackdrop(transmitting: session.isTalking)
-            if session.hasConnectedOnce {
+            if !session.signedIn {
+                AccountGate(session: session)
+            } else if session.hasConnectedOnce {
                 talkScreen
             } else {
-                loginScreen
+                homeScreen
             }
             if darkMode {
                 darkOverlay
@@ -72,7 +74,7 @@ struct ContentView: View {
         }
     }
 
-    private var loginScreen: some View {
+    private var homeScreen: some View {
         ScrollView {
             GlassEffectContainer(spacing: 12) {
                 VStack(alignment: .leading, spacing: 18) {
@@ -83,21 +85,11 @@ struct ContentView: View {
                             .glassEffect(.regular.tint(.red), in: Circle())
                         Text("Walkie")
                             .font(.largeTitle.weight(.bold))
-                        Text("Opprett en gruppe, eller bli med på navnet.")
+                        Text(accountCaption)
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.bottom, 4)
-
-                    labeledField("Navn") {
-                        TextField("Ditt navn", text: $session.name)
-                            .textContentType(.name)
-                            .textInputAutocapitalization(.words)
-                            .submitLabel(.next)
-                            .focused($focus, equals: .name)
-                            .onSubmit { focus = .server }
-                            .glassFieldChrome()
-                    }
 
                     GroupEditor(session: session)
 
@@ -137,11 +129,21 @@ struct ContentView: View {
                             .buttonStyle(.glass)
                             .frame(maxWidth: .infinity)
                     }
+
+                    Button("Logg ut", action: session.logOut)
+                        .buttonStyle(.glass)
+                        .frame(maxWidth: .infinity)
                 }
             }
             .padding(24)
         }
         .scrollDismissesKeyboard(.interactively)
+    }
+
+    private var accountCaption: String {
+        if session.accountUsername.isEmpty { return session.name }
+        if session.name.isEmpty { return "@\(session.accountUsername)" }
+        return "\(session.name) (@\(session.accountUsername))"
     }
 
     private var talkScreen: some View {
@@ -253,6 +255,8 @@ struct ContentView: View {
         switch session.linkState {
         case .connected:
             return "checkmark.circle.fill"
+        case .signedIn:
+            return "person.crop.circle"
         case .connecting:
             return "ellipsis.circle.fill"
         case .reconnecting:
@@ -468,8 +472,142 @@ private struct GroupSheet: View {
             }
             .navigationTitle("Grupper")
             .toolbar {
-                Button("Ferdig") { dismiss() }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Logg ut") {
+                        session.logOut()
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Ferdig") { dismiss() }
+                }
             }
+        }
+    }
+}
+
+private struct AccountGate: View {
+    @ObservedObject var session: WalkieSession
+    @State private var username = ""
+    @State private var displayName = ""
+    @State private var password = ""
+    @FocusState private var focus: Field?
+
+    private enum Field: Hashable {
+        case username, displayName, password, server
+    }
+
+    var body: some View {
+        ScrollView {
+            GlassEffectContainer(spacing: 12) {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(spacing: 12) {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 34, weight: .semibold))
+                            .frame(width: 88, height: 88)
+                            .glassEffect(.regular.tint(.red), in: Circle())
+                        Text("Walkie")
+                            .font(.largeTitle.weight(.bold))
+                        Text("Logg inn, eller opprett en konto.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.bottom, 4)
+
+                    labeledField("Brukernavn") {
+                        TextField("brukernavn", text: $username)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .textContentType(.username)
+                            .submitLabel(.next)
+                            .focused($focus, equals: .username)
+                            .onSubmit { focus = .displayName }
+                            .glassFieldChrome()
+                    }
+                    labeledField("Visningsnavn") {
+                        TextField("Navnet andre ser", text: $displayName)
+                            .textContentType(.name)
+                            .textInputAutocapitalization(.words)
+                            .submitLabel(.next)
+                            .focused($focus, equals: .displayName)
+                            .onSubmit { focus = .password }
+                            .glassFieldChrome()
+                    }
+                    labeledField("Passord") {
+                        SecureField("Minst 4 tegn", text: $password)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .textContentType(.password)
+                            .submitLabel(.go)
+                            .focused($focus, equals: .password)
+                            .onSubmit { logIn() }
+                            .glassFieldChrome()
+                    }
+                    labeledField("Server") {
+                        TextField(WalkieSession.defaultServerURL, text: $session.serverURL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                            .textContentType(.URL)
+                            .submitLabel(.go)
+                            .focused($focus, equals: .server)
+                            .onSubmit { logIn() }
+                            .glassFieldChrome()
+                    }
+                    Button(action: signUp) {
+                        Text("Opprett konto")
+                            .font(.title3.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .tint(.red)
+                    .controlSize(.large)
+                    .disabled(busy)
+                    Button(action: logIn) {
+                        Text("Logg inn")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glass)
+                    .disabled(busy)
+                    if busy {
+                        Label(session.restoringSession ? "Logger inn…" : session.statusText, systemImage: "ellipsis.circle.fill")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                        Button("Avbryt") { session.cancelAccountConnect() }
+                            .buttonStyle(.glass)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+            }
+            .padding(24)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .onAppear {
+            if username.isEmpty { username = session.accountUsername }
+            if displayName.isEmpty { displayName = session.name }
+        }
+    }
+
+    private var busy: Bool {
+        session.restoringSession || session.linkState == .connecting || session.linkState == .reconnecting
+    }
+
+    private func signUp() {
+        session.signUp(username: username, displayName: displayName, password: password)
+    }
+
+    private func logIn() {
+        session.logIn(username: username, password: password)
+    }
+
+    private func labeledField<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
         }
     }
 }
@@ -477,10 +615,10 @@ private struct GroupSheet: View {
 private struct GroupEditor: View {
     @ObservedObject var session: WalkieSession
     @State private var draftName = ""
-    @State private var draftPassword = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            InviteSection(session: session)
             Text("Gruppe")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -488,11 +626,6 @@ private struct GroupEditor: View {
                 .textInputAutocapitalization(.words)
                 .autocorrectionDisabled()
                 .submitLabel(.done)
-                .glassFieldChrome()
-            SecureField("Passord (valgfritt)", text: $draftPassword)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .textContentType(.password)
                 .glassFieldChrome()
             HStack(spacing: 10) {
                 Button(action: createTapped) {
@@ -502,7 +635,7 @@ private struct GroupEditor: View {
                 .buttonStyle(.glassProminent)
                 .tint(.red)
                 Button(action: joinTapped) {
-                    Text("Bli med i gruppe")
+                    Text("Be om å bli med")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glass)
@@ -512,19 +645,66 @@ private struct GroupEditor: View {
     }
 
     private func createTapped() {
-        let saved = session.createGroup(named: draftName, password: draftPassword)
+        let saved = session.createGroup(named: draftName)
         if saved {
             draftName = ""
-            draftPassword = ""
         }
     }
 
     private func joinTapped() {
-        let saved = session.joinGroup(named: draftName, password: draftPassword)
+        let saved = session.requestJoin(named: draftName)
         if saved {
             draftName = ""
-            draftPassword = ""
         }
+    }
+}
+
+private struct InviteSection: View {
+    @ObservedObject var session: WalkieSession
+
+    var body: some View {
+        if session.invites.isEmpty {
+            EmptyView()
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Invitasjoner")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(session.invites) { invite in
+                    InviteRow(session: session, invite: invite)
+                }
+            }
+        }
+    }
+}
+
+private struct InviteRow: View {
+    @ObservedObject var session: WalkieSession
+    let invite: WalkieInvite
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(invite.name)
+                .font(.headline)
+            Text(fromLine)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Button("Godta") { session.replyInvite(room: invite.room, accept: true) }
+                    .buttonStyle(.glassProminent)
+                    .tint(.red)
+                Button("Avslå") { session.replyInvite(room: invite.room, accept: false) }
+                    .buttonStyle(.glass)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var fromLine: String {
+        if invite.fromName.isEmpty { return "Invitasjon" }
+        return "Fra \(invite.fromName)"
     }
 }
 
@@ -559,6 +739,9 @@ private struct GroupRow: View {
                 .accessibilityLabel("Fjern \(group.name)")
             }
             Toggle("Lytt", isOn: listenBinding)
+            if group.admin {
+                AdminTools(session: session, group: group)
+            }
             ProblemLine(text: session.joinProblem(for: group.id))
             MemberList(session: session, groupID: group.id)
             PresenceCaption(text: session.presenceCaption(for: group.id))
@@ -568,7 +751,7 @@ private struct GroupRow: View {
     }
 
     private var title: String {
-        group.locked ? "\(group.name) 🔒" : group.name
+        group.admin ? "\(group.name) · admin" : group.name
     }
 
     private var talkTitle: String {
@@ -588,6 +771,92 @@ private struct GroupRow: View {
 
     private func remove() {
         session.removeGroup(group.id)
+    }
+}
+
+private struct AdminTools: View {
+    @ObservedObject var session: WalkieSession
+    let group: WalkieGroup
+    @State private var inviteName = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("Brukernavn", text: $inviteName)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.send)
+                    .onSubmit(invite)
+                    .glassFieldChrome()
+                Button("Invitér", action: invite)
+                    .buttonStyle(.glass)
+            }
+            ForEach(pendingRequests) { request in
+                RequestRow(session: session, request: request)
+            }
+            ForEach(group.roster) { member in
+                RosterLine(session: session, groupID: group.id, member: member)
+            }
+        }
+    }
+
+    private var pendingRequests: [WalkieRequest] {
+        session.requests.filter { $0.room == group.id }
+    }
+
+    private func invite() {
+        let saved = session.invite(room: group.id, username: inviteName)
+        if saved { inviteName = "" }
+    }
+}
+
+private struct RequestRow: View {
+    @ObservedObject var session: WalkieSession
+    let request: WalkieRequest
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(requestLabel)
+                .font(.subheadline.weight(.semibold))
+            HStack(spacing: 10) {
+                Button("Godta") { session.replyRequest(room: request.room, username: request.username, accept: true) }
+                    .buttonStyle(.glassProminent)
+                    .tint(.red)
+                Button("Avslå") { session.replyRequest(room: request.room, username: request.username, accept: false) }
+                    .buttonStyle(.glass)
+            }
+        }
+    }
+
+    private var requestLabel: String {
+        "\(request.displayName) (@\(request.username)) ber om å bli med"
+    }
+}
+
+private struct RosterLine: View {
+    @ObservedObject var session: WalkieSession
+    let groupID: String
+    let member: AccountMember
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(memberLine)
+                .font(.subheadline)
+            Spacer(minLength: 8)
+            if canRemove {
+                Button("Fjern") { session.removeMember(room: groupID, username: member.username) }
+                    .buttonStyle(.glass)
+            }
+        }
+    }
+
+    private var memberLine: String {
+        if member.name.isEmpty { return "@\(member.username)" }
+        return "\(member.name) (@\(member.username))"
+    }
+
+    private var canRemove: Bool {
+        member.username != session.accountUsername && member.role != "admin"
     }
 }
 

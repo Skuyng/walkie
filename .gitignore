@@ -1,5 +1,6 @@
 node_modules/
 room-secrets.json
+data/
 DerivedData/
 xcuserdata/
 *.xcuserstate

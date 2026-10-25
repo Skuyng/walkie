@@ -1,8 +1,8 @@
 # Walkie for iPhone
 
-Walkie er en enkel walkie-talkie. Appen kobler seg til den samme serveren som nettsiden. Du oppretter en gruppe (for eksempel Familie eller Jobb) eller blir med på navnet. Hold den store knappen inne for å snakke, eller hold volum opp inne. Du kan lytte til flere grupper samtidig, og velge én gruppe å snakke i. Du hører de andre også når skjermen er låst.
+Walkie er en enkel walkie-talkie. Appen kobler seg til den samme serveren som nettsiden. Du logger inn med brukernavn og passord, oppretter en gruppe (for eksempel Familie eller Jobb), eller ber om å bli med. Hold den store knappen inne for å snakke, eller hold volum opp inne. Du kan lytte til flere grupper samtidig, og velge én gruppe å snakke i. Du hører de andre også når skjermen er låst.
 
-Standard server er `wss://walkie-bc0z.onrender.com`. Adressen kan endres i appen. Navn, grupper og server lagres på telefonen (UserDefaults). Et valgfritt gruppepassord lagres i Keychain, ikke i UserDefaults.
+Standard server er `wss://walkie-bc0z.onrender.com`. Adressen kan endres i appen. Visningsnavn, lytting og server lagres på telefonen (UserDefaults). Innloggingstoken lagres i Keychain, så appen logger inn av seg selv neste gang.
 
 Prosjektet er SwiftUI, iOS 26 eller nyere, og har ingen tredjepartspakker. `Walkie.xcodeproj` er sjekket inn, så du trenger ikke XcodeGen for å bygge.
 
@@ -22,16 +22,21 @@ Du trenger en Mac med Xcode 26 og en iPhone med iOS 26 eller nyere. En betalt ut
 10. Øverst i vinduet velger du din iPhone som kjøringsmål. Simulatoren kan vise skjermen, men mikrofon, høyttaler og låst skjerm må prøves på telefonen.
 11. Trykk **Run** (▶). Første bygging tar litt tid. Telefonen må være ulåst.
 12. Hvis appen ikke starter fordi utvikleren ikke er klarert: på iPhone, **Innstillinger → Generelt → VPN og enhetsadministrasjon** (på noen versjoner heter det **Enhetsadministrasjon**). Velg profilen din og trykk **Stol på**.
-13. Åpne Walkie og tillat mikrofon når iOS spør.
-14. Skriv navn, opprett eller bli med i en gruppe, sjekk serveradressen, og trykk **Koble til**. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe.
+13. Åpne Walkie. Opprett en konto (brukernavn, visningsnavn, passord) eller logg inn.
+14. Opprett en gruppe eller be om å bli med, sjekk serveradressen, og trykk **Koble til**. Tillat mikrofon når iOS spør. Hold den store knappen inne for å snakke. Hold volum opp inne for å sende mens appen er i forgrunnen, og slipp for å stoppe. **Logg ut** ligger i Grupper.
 
 En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xcode på nytt. Et personlig team kan bare ha noen få egne apper installert samtidig.
 
 ## Slik bruker du den
 
-- **Navn** — vises til de andre (maks 30 tegn).
-- **Opprett gruppe** — lager en gruppe med navnet du skriver, for eksempel `Familie`. Store og små bokstaver er samme gruppe (maks 40 tegn). Valgfritt **Passord** låser gruppen. Passordet lagres i Keychain.
-- **Bli med i gruppe** — legger deg til en gruppe andre har opprettet, med samme navn og passord hvis gruppen er låst. Feil passord vises som «Feil passord».
+- **Brukernavn** — unikt, 3–20 tegn (a–z, 0–9, punktum, bindestrek, understrek).
+- **Visningsnavn** — det andre ser (maks 30 tegn).
+- **Passord** — minst 4 tegn. Serveren lagrer en scrypt-hash, ikke passordet.
+- **Logg ut** — i Grupper-arket. Tokenet slettes fra Keychain.
+- **Opprett gruppe** — du blir admin. Store og små bokstaver er samme gruppe.
+- **Be om å bli med** — admin godkjenner eller avslår. Har du en invitasjon, godtar du den i stedet.
+- **Invitér** — admin skriver et brukernavn. Invitasjonen vises hos den andre under Invitasjoner, med Godta og Avslå.
+- **Fjern** — admin kan fjerne andre medlemmer. Admin sletter gruppen. Medlemmer forlater den.
 - **Lytt** — på per gruppe. Du kan lytte til flere samtidig. Av gjør at du fortsatt ser hvem som er pålogget, men ikke hører lyden.
 - **Snakk / Velg** — én gruppe om gangen. Hold-for-å-snakke og volum opp sender bare dit.
 - **Pålogget** — grønn prikk ved navnet. Den som snakker utheves.
@@ -48,14 +53,16 @@ Appen snakker samme protokoll som `server.js` og `public/index.html`.
 
 Tekst (JSON):
 
-- til serveren: `{"t":"groups","name":"…","talk":"…","groups":[{"room":"…","password":"…","create":false,"listen":true}]}`
-- til serveren, etter `groups`: `{"t":"join","name":"…","room":"…","password":"…"}` slik at en eldre server fortsatt legger deg i én kanal
+- til serveren: `{"t":"signup","username":"…","name":"…","password":"…"}`, `{"t":"login","username":"…","password":"…"}` eller `{"t":"resume","token":"…"}`
+- fra serveren: `{"t":"session","token":"…","username":"…","name":"…"}` og deretter `{"t":"inbox","groups":[…],"invites":[…],"requests":[…]}`
+- til serveren: `{"t":"subscribe","talk":"…","muted":["…"]}` — `muted` er grupper du er medlem av, men ikke lytter til
+- til serveren: `{"t":"createGroup"}`, `{"t":"invite"}`, `{"t":"inviteReply"}`, `{"t":"requestJoin"}`, `{"t":"requestReply"}`, `{"t":"removeMember"}`, `{"t":"leave"}`, `{"t":"deleteGroup"}`
 - til serveren: `{"t":"start","room":"…"}` og `{"t":"stop","room":"…"}`
-- fra serveren: `{"t":"users","room":"…","users":["…"],"members":[{"id":"…","name":"…"}],"self":"…"}` bare til dem som har riktig passord. `members` er én rad per tilkobling, så to med samme navn vises begge. `users` er fortsatt navnelisten.
+- fra serveren: `{"t":"users","room":"…","users":["…"],"members":[{"id":"…","name":"…"}],"self":"…"}` bare til medlemmer. `members` er én rad per tilkobling, så to med samme navn vises begge. `users` er fortsatt navnelisten.
 - fra serveren: `{"t":"start","name":"…","room":"…","id":"…"}` og `{"t":"stop","name":"…","room":"…","id":"…"}`
-- fra serveren: `{"t":"error","room":"…","error":"Feil passord"}` når passordet er feil
+- fra serveren: `{"t":"error","room":"…","error":"Ikke medlem"}` når du ikke er medlem
 
-En eldre klient som bare sender `join` uten `groups` blir fortsatt med i én gruppe. Lyd sendes aldri til en socket som ikke er godkjent for gruppen, og bare til dem som lytter.
+Lyd sendes aldri til en socket som ikke er medlem, og bare til dem som lytter. Gruppepassord brukes ikke lenger.
 
 Lyd er binære websocket-rammer uten filheader: **PCM, 16-bit med fortegn, little-endian, mono, 16 000 Hz**. Nettleseren legger `sample * 32767` i en `Int16Array` og spiller av med `/ 32768`. iPhone gjør det samme, så appen og nettsiden kan være i samme gruppe. Meldingsraten er fortsatt 16 kHz, slik at eldre klienter kan dekode lyden.
 
@@ -87,6 +94,6 @@ xcodegen generate
 
 ## Begrensninger
 
-- To personer med samme navn skilles ikke av serveren.
+- To personer med samme visningsnavn vises som to rader, én per tilkobling.
 - Låst skjerm er satt opp med lydmodus og en aktiv `playAndRecord`-økt. Det er ikke prøvd på en fysisk iPhone herfra. iOS kan likevel stanse appen hvis det er lite ledig minne.
 - `ws://` mot offentlig nett kan bli stoppet av App Transport Security. Bruk `wss://` mot Render. Lokalt nett er tillatt.

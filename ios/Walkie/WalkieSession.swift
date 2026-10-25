@@ -26,6 +26,11 @@ final class WalkieSession: ObservableObject {
     @Published private(set) var suggestsSettings = false
     @Published private(set) var hasConnectedOnce = false
     @Published var speakerphone: Bool
+    @Published private(set) var signedIn = false
+    @Published private(set) var restoringSession = false
+    @Published private(set) var accountUsername = ""
+    @Published private(set) var invites: [WalkieInvite] = []
+    @Published private(set) var requests: [WalkieRequest] = []
 
     var canTransmit: Bool {
         linkState == .connected && audioReady
@@ -111,6 +116,17 @@ final class WalkieSession: ObservableObject {
     private var shouldReconnect = false
     private var connectTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var accountToken: String?
+    private var pendingAuth: PendingAuth?
+    private var keepAccount = false
+    private var socketOpen = false
+    private var socketReady = false
+    private var preferTalk: String?
+
+    private enum PendingAuth {
+        case signup(user: String, display: String, password: String)
+        case login(user: String, password: String)
+    }
 
     init() {
         let defaults = UserDefaults.standard
@@ -119,22 +135,6 @@ final class WalkieSession: ObservableObject {
         let storedServer = defaults.string(forKey: Key.server) ?? ""
         var storedGroups = Self.loadGroups(defaults)
         var storedTalk = defaults.string(forKey: Key.talkGroup) ?? ""
-        if storedGroups.isEmpty {
-            let migrated = Self.clip(storedRoom, limit: 40).lowercased()
-            if !migrated.isEmpty {
-                storedGroups = [
-                    WalkieGroup(id: migrated, name: storedRoom, listen: true, locked: false, setsPassword: false)
-                ]
-                storedTalk = migrated
-            }
-        }
-        storedGroups = storedGroups.map { group in
-            var copy = group
-            if GroupPasswordStore.load(account: group.id) != nil {
-                copy.locked = true
-            }
-            return copy
-        }
         if !storedGroups.contains(where: { $0.id == storedTalk }) {
             storedTalk = storedGroups.first?.id ?? ""
         }
@@ -143,6 +143,7 @@ final class WalkieSession: ObservableObject {
         talkGroup = storedTalk
         room = storedGroups.first { $0.id == storedTalk }?.name ?? storedRoom
         serverURL = storedServer.isEmpty ? Self.defaultServerURL : storedServer
+        accountUsername = defaults.string(forKey: Key.username) ?? ""
         speakerphone = defaults.object(forKey: Key.speakerphone) as? Bool ?? true
         engine.setSpeakerphone(speakerphone)
         engine.activateForSystemVolume()
@@ -185,6 +186,14 @@ final class WalkieSession: ObservableObject {
                 self?.volumeButtons.noteSessionReconfigured()
             }
         }
+        if let token = AccountTokenStore.load(), !token.isEmpty {
+            accountToken = token
+            keepAccount = true
+            restoringSession = true
+            statusText = "Logger inn…"
+            linkState = .connecting
+            openAccountSocket()
+        }
     }
 
     func savePreferences() {
@@ -194,21 +203,153 @@ final class WalkieSession: ObservableObject {
         saveGroups()
     }
 
-    @discardableResult
-    func createGroup(named rawName: String, password rawPassword: String) -> Bool {
-        upsert(named: rawName, password: rawPassword, creating: true)
+    func signUp(username rawUser: String, displayName rawDisplay: String, password rawPassword: String) {
+        let user = Self.normalizeUsername(rawUser)
+        let display = Self.clip(rawDisplay, limit: 30)
+        let password = String(rawPassword.prefix(80))
+        guard Self.validUsername(user) else {
+            suggestsSettings = false
+            errorMessage = "Brukernavnet må være 3–20 tegn (a–z, 0–9)."
+            return
+        }
+        guard !display.isEmpty else {
+            suggestsSettings = false
+            errorMessage = "Skriv et navn."
+            return
+        }
+        guard password.count >= 4 else {
+            suggestsSettings = false
+            errorMessage = "Passordet må ha minst 4 tegn."
+            return
+        }
+        name = display
+        pendingAuth = .signup(user: user, display: display, password: password)
+        savePreferences()
+        dismissError()
+        flushOrOpen()
+    }
+
+    func logIn(username rawUser: String, password rawPassword: String) {
+        let user = Self.normalizeUsername(rawUser)
+        let password = String(rawPassword.prefix(80))
+        guard Self.validUsername(user) else {
+            suggestsSettings = false
+            errorMessage = "Brukernavnet må være 3–20 tegn (a–z, 0–9)."
+            return
+        }
+        guard password.count >= 4 else {
+            suggestsSettings = false
+            errorMessage = "Passordet må ha minst 4 tegn."
+            return
+        }
+        pendingAuth = .login(user: user, password: password)
+        dismissError()
+        flushOrOpen()
+    }
+
+    func logOut() {
+        keepAccount = false
+        shouldReconnect = false
+        pendingAuth = nil
+        restoringSession = false
+        accountToken = nil
+        AccountTokenStore.delete()
+        signedIn = false
+        accountUsername = ""
+        defaults.removeObject(forKey: Key.username)
+        groups = []
+        invites = []
+        requests = []
+        talkGroup = ""
+        room = ""
+        preferTalk = nil
+        saveGroups()
+        if socketOpen {
+            socket.sendLogout { [weak self] in
+                Task { @MainActor in self?.disconnect() }
+            }
+        } else {
+            disconnect()
+        }
+    }
+
+    func cancelAccountConnect() {
+        pendingAuth = nil
+        restoringSession = false
+        keepAccount = false
+        shouldReconnect = false
+        socket.close()
+        socketOpen = false
+        socketReady = false
+        linkState = .disconnected
+        statusText = "Ikke tilkoblet"
     }
 
     @discardableResult
-    func joinGroup(named rawName: String, password rawPassword: String) -> Bool {
-        upsert(named: rawName, password: rawPassword, creating: false)
+    func createGroup(named rawName: String) -> Bool {
+        let label = Self.clip(rawName, limit: 30)
+        let id = label.lowercased()
+        guard !id.isEmpty else {
+            suggestsSettings = false
+            errorMessage = "Skriv et gruppenavn."
+            return false
+        }
+        guard signedIn, socketOpen else {
+            suggestsSettings = false
+            errorMessage = "Logg inn"
+            return false
+        }
+        preferTalk = id
+        socket.sendCreateGroup(name: label)
+        return true
+    }
+
+    @discardableResult
+    func requestJoin(named rawName: String) -> Bool {
+        let label = Self.clip(rawName, limit: 30)
+        guard !label.isEmpty else {
+            suggestsSettings = false
+            errorMessage = "Skriv et gruppenavn."
+            return false
+        }
+        guard signedIn, socketOpen else {
+            suggestsSettings = false
+            errorMessage = "Logg inn"
+            return false
+        }
+        socket.sendRequestJoin(name: label)
+        return true
+    }
+
+    @discardableResult
+    func invite(room: String, username rawUser: String) -> Bool {
+        let user = Self.normalizeUsername(rawUser)
+        guard Self.validUsername(user) else {
+            suggestsSettings = false
+            errorMessage = "Skriv et brukernavn."
+            return false
+        }
+        socket.sendInvite(room: room, username: user)
+        return true
+    }
+
+    func replyInvite(room: String, accept: Bool) {
+        socket.sendInviteReply(room: room, accept: accept)
+    }
+
+    func replyRequest(room: String, username: String, accept: Bool) {
+        socket.sendRequestReply(room: room, username: username, accept: accept)
+    }
+
+    func removeMember(room: String, username: String) {
+        socket.sendRemoveMember(room: room, username: username)
     }
 
     func setListening(_ id: String, _ listen: Bool) {
         guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
         groups[index].listen = listen
         saveGroups()
-        pushMembership()
+        pushSubscribe()
     }
 
     func selectTalk(_ id: String) {
@@ -216,12 +357,17 @@ final class WalkieSession: ObservableObject {
         talkGroup = id
         syncRoomName()
         saveGroups()
-        pushMembership()
+        pushSubscribe()
     }
 
     func removeGroup(_ id: String) {
+        guard let group = groups.first(where: { $0.id == id }) else { return }
+        if group.admin {
+            socket.sendDeleteGroup(room: id)
+        } else {
+            socket.sendLeave(room: id)
+        }
         groups.removeAll { $0.id == id }
-        GroupPasswordStore.delete(account: id)
         membersByRoom[id] = nil
         joinProblems[id] = nil
         let leaving = talkers.filter { $0.room == id }
@@ -233,7 +379,7 @@ final class WalkieSession: ObservableObject {
             syncRoomName()
         }
         saveGroups()
-        pushMembership()
+        pushSubscribe()
     }
 
     func saveSpeakerphone() {
@@ -261,13 +407,12 @@ final class WalkieSession: ObservableObject {
     }
 
     func connect() {
-        guard linkState == .disconnected else { return }
-        let trimmedName = Self.clip(name, limit: 30)
-        guard !trimmedName.isEmpty else {
+        guard signedIn else {
             suggestsSettings = false
-            errorMessage = "Skriv inn navn."
+            errorMessage = "Logg inn"
             return
         }
+        guard linkState == .signedIn || linkState == .disconnected else { return }
         guard !groups.isEmpty else {
             suggestsSettings = false
             errorMessage = "Opprett eller bli med i en gruppe."
@@ -281,20 +426,21 @@ final class WalkieSession: ObservableObject {
             errorMessage = "Serveradressen må være ws:// eller wss://."
             return
         }
-        name = trimmedName
         syncRoomName()
         serverURL = url.absoluteString
         savePreferences()
+        let sameServer = socketOpen && activeURL == url
         activeURL = url
         shouldReconnect = true
-        membersByRoom = [:]
-        selfID = ""
-        talkers = []
+        dismissError()
         linkState = .connecting
         statusText = "Kobler til…"
-        dismissError()
         connectTask?.cancel()
-        connectTask = Task { await self.startAudioAndSocket() }
+        if sameServer {
+            connectTask = Task { await self.startAudioOnly() }
+        } else {
+            connectTask = Task { await self.startAudioAndSocket() }
+        }
     }
 
     func disconnect() {
@@ -303,11 +449,23 @@ final class WalkieSession: ObservableObject {
         reconnectTask?.cancel()
         setVolumeButtonMonitoringEnabled(false)
         endTransmitting()
-        socket.close()
         engine.stop()
         audioReady = false
         hasConnectedOnce = false
         clearPresence()
+        if signedIn && keepAccount {
+            prepareVolumeHUD()
+            if socketOpen {
+                linkState = .signedIn
+                statusText = "Innlogget"
+            } else {
+                openAccountSocket()
+            }
+            return
+        }
+        socket.close()
+        socketOpen = false
+        socketReady = false
         linkState = .disconnected
         statusText = "Ikke tilkoblet"
         prepareVolumeHUD()
@@ -379,8 +537,46 @@ final class WalkieSession: ObservableObject {
             return
         }
         audioReady = true
+        if signedIn {
+            hasConnectedOnce = true
+            linkState = .connected
+            statusText = "Tilkoblet"
+        }
         guard let activeURL else { return }
         socket.connect(url: activeURL)
+    }
+
+    private func startAudioOnly() async {
+        let granted = await requestMicrophoneAccess()
+        guard shouldReconnect, !Task.isCancelled else { return }
+        guard granted else {
+            failBeforeSession(VoiceEngineError.microphoneDenied.localizedDescription, settings: true)
+            return
+        }
+        do {
+            try engine.start()
+        } catch VoiceEngineError.microphoneDenied {
+            failBeforeSession(VoiceEngineError.microphoneDenied.localizedDescription, settings: true)
+            return
+        } catch let error as VoiceEngineError {
+            let denied = AVAudioApplication.shared.recordPermission != .granted
+            failBeforeSession(error.localizedDescription, settings: denied)
+            return
+        } catch {
+            failBeforeSession("Fikk ikke startet lyden.", settings: false)
+            return
+        }
+        guard shouldReconnect, !Task.isCancelled else {
+            engine.stop()
+            audioReady = false
+            prepareVolumeHUD()
+            return
+        }
+        audioReady = true
+        hasConnectedOnce = true
+        linkState = .connected
+        statusText = "Tilkoblet"
+        pushSubscribe()
     }
 
     /// Always asks before the engine starts. A granted or denied answer returns
@@ -394,21 +590,27 @@ final class WalkieSession: ObservableObject {
         audioReady = false
         engine.stop()
         clearPresence()
-        linkState = .disconnected
-        statusText = "Ikke tilkoblet"
+        if signedIn {
+            linkState = .signedIn
+            statusText = "Innlogget"
+        } else {
+            linkState = .disconnected
+            statusText = "Ikke tilkoblet"
+        }
         suggestsSettings = settings
         errorMessage = message
         prepareVolumeHUD()
     }
 
     private func handleOpen() {
-        hasConnectedOnce = true
-        linkState = .connected
-        statusText = "Tilkoblet"
-        pushMembership()
+        socketOpen = true
+        socketReady = false
+        flushAuth()
     }
 
     private func handleClose() {
+        socketOpen = false
+        socketReady = false
         let somebodyTalking = !talkers.isEmpty
         talkers.removeAll()
         membersByRoom = [:]
@@ -418,9 +620,17 @@ final class WalkieSession: ObservableObject {
         }
         engine.markTalkBurstEnded()
         endTransmitting()
-        guard shouldReconnect else { return }
-        linkState = .reconnecting
-        statusText = "Frakoblet – prøver igjen…"
+        let wantsAudio = shouldReconnect
+        let wantsAccount = keepAccount
+        guard wantsAudio || wantsAccount else { return }
+        if wantsAudio {
+            linkState = .reconnecting
+            statusText = "Frakoblet – prøver igjen…"
+        } else {
+            linkState = .connecting
+            restoringSession = !signedIn
+            statusText = signedIn ? "Kobler til…" : "Logger inn…"
+        }
         scheduleReconnect()
     }
 
@@ -428,14 +638,37 @@ final class WalkieSession: ObservableObject {
         reconnectTask?.cancel()
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
-            guard let self, self.shouldReconnect, !Task.isCancelled, let url = self.activeURL else { return }
-            self.statusText = "Kobler til…"
+            guard let self, !Task.isCancelled, !self.socketOpen, let url = self.activeURL else { return }
+            guard self.shouldReconnect || self.keepAccount else { return }
+            self.statusText = self.signedIn ? "Kobler til…" : "Logger inn…"
             self.socket.connect(url: url)
         }
     }
 
     private func handle(_ event: ServerEvent) {
         switch event {
+        case .session(let token, let username, let displayName):
+            accountToken = token
+            AccountTokenStore.save(token)
+            accountUsername = username
+            defaults.set(username, forKey: Key.username)
+            if !displayName.isEmpty { name = displayName }
+            signedIn = true
+            restoringSession = false
+            keepAccount = true
+            socketReady = true
+            pendingAuth = nil
+            if audioReady {
+                hasConnectedOnce = true
+                linkState = .connected
+                statusText = "Tilkoblet"
+            } else {
+                linkState = .signedIn
+                statusText = "Innlogget"
+            }
+            savePreferences()
+        case .inbox(let serverGroups, let nextInvites, let nextRequests):
+            applyInbox(serverGroups, invites: nextInvites, requests: nextRequests)
         case .users(let room, let members, let selfID):
             let key = room.isEmpty ? talkGroup : room
             guard !key.isEmpty else { return }
@@ -460,7 +693,31 @@ final class WalkieSession: ObservableObject {
         case .talkStopped(let name, let room, let id):
             removeTalker(id: id.isEmpty ? name : id, room: room.isEmpty ? talkGroup : room)
         case .rejected(let room, let message):
-            let text = message.isEmpty ? "Feil passord" : message
+            let text = message.isEmpty ? "Noe gikk galt" : message
+            if !signedIn {
+                shouldReconnect = false
+                accountToken = nil
+                AccountTokenStore.delete()
+                keepAccount = false
+                restoringSession = false
+                pendingAuth = nil
+                groups = []
+                invites = []
+                requests = []
+                audioReady = false
+                hasConnectedOnce = false
+                engine.stop()
+                clearPresence()
+                socket.close()
+                socketOpen = false
+                socketReady = false
+                linkState = .disconnected
+                statusText = "Ikke tilkoblet"
+                suggestsSettings = false
+                errorMessage = text == "Logg inn" ? "Logg inn på nytt." : text
+                prepareVolumeHUD()
+                return
+            }
             if !room.isEmpty {
                 joinProblems[room] = text
             }
@@ -503,67 +760,90 @@ final class WalkieSession: ObservableObject {
         }
     }
 
-    @discardableResult
-    private func upsert(named rawName: String, password rawPassword: String, creating: Bool) -> Bool {
-        let label = Self.clip(rawName, limit: 40)
-        let id = label.lowercased()
-        guard !id.isEmpty else {
-            suggestsSettings = false
-            errorMessage = "Skriv et gruppenavn."
-            return false
-        }
-        let secret = String(rawPassword.prefix(80))
-        if let index = groups.firstIndex(where: { $0.id == id }) {
-            groups[index].name = label
-            groups[index].listen = true
-            if !secret.isEmpty {
-                GroupPasswordStore.save(secret, account: id)
-                groups[index].locked = true
-                if creating {
-                    groups[index].setsPassword = true
-                }
-            } else if creating {
-                groups[index].setsPassword = false
-            }
-        } else {
-            let storesSecret = !secret.isEmpty
-            if storesSecret {
-                GroupPasswordStore.save(secret, account: id)
-            }
-            groups.append(
+    private func applyInbox(_ serverGroups: [ServerGroup], invites nextInvites: [WalkieInvite], requests nextRequests: [WalkieRequest]) {
+        let previous = groups
+        var next: [WalkieGroup] = []
+        for item in serverGroups {
+            let listen = previous.first { $0.id == item.id }?.listen ?? true
+            next.append(
                 WalkieGroup(
-                    id: id,
-                    name: label,
-                    listen: true,
-                    locked: storesSecret,
-                    setsPassword: creating && storesSecret
+                    id: item.id,
+                    name: item.name,
+                    listen: listen,
+                    admin: item.admin,
+                    roster: item.members
                 )
             )
         }
-        if creating || talkGroup.isEmpty {
-            talkGroup = id
+        groups = next
+        invites = nextInvites
+        requests = nextRequests
+        if let prefer = preferTalk, next.contains(where: { $0.id == prefer }) {
+            talkGroup = prefer
+        }
+        preferTalk = nil
+        if !next.contains(where: { $0.id == talkGroup }) {
+            talkGroup = next.first?.id ?? ""
         }
         syncRoomName()
         saveGroups()
-        pushMembership()
-        return true
+        if signedIn && socketReady {
+            pushSubscribe()
+        }
     }
 
-    private func pushMembership() {
-        guard linkState == .connected else { return }
-        let wires = groups.map { group in
-            GroupWire(
-                room: group.id,
-                password: GroupPasswordStore.load(account: group.id) ?? "",
-                create: group.setsPassword,
-                listen: group.listen
-            )
+    private func pushSubscribe() {
+        guard socketOpen, signedIn, socketReady else { return }
+        let muted = groups.filter { !$0.listen }.map(\.id)
+        socket.sendSubscribe(talk: talkGroup, muted: muted)
+    }
+
+    private func flushOrOpen() {
+        if socketOpen {
+            flushAuth()
+        } else {
+            openAccountSocket()
         }
-        socket.sendGroups(name: name, talk: talkGroup, groups: wires)
-        if !talkGroup.isEmpty {
-            let password = GroupPasswordStore.load(account: talkGroup) ?? ""
-            socket.sendJoin(name: name, room: talkGroup, password: password)
+    }
+
+    private func flushAuth() {
+        guard socketOpen else { return }
+        if let pending = pendingAuth {
+            pendingAuth = nil
+            switch pending {
+            case .signup(let user, let display, let password):
+                socket.sendSignup(username: user, name: display, password: password)
+            case .login(let user, let password):
+                socket.sendLogin(username: user, password: password)
+            }
+            return
         }
+        if let token = accountToken, !token.isEmpty, !socketReady {
+            socket.sendResume(token: token)
+            return
+        }
+        if signedIn && socketReady {
+            pushSubscribe()
+        }
+    }
+
+    private func openAccountSocket() {
+        guard let url = Self.normalizeServerURL(serverURL) else {
+            suggestsSettings = false
+            errorMessage = "Serveradressen må være ws:// eller wss://."
+            restoringSession = false
+            linkState = signedIn ? .signedIn : .disconnected
+            return
+        }
+        serverURL = url.absoluteString
+        activeURL = url
+        savePreferences()
+        keepAccount = true
+        if linkState == .disconnected || linkState == .signedIn {
+            linkState = .connecting
+            statusText = restoringSession ? "Logger inn…" : "Kobler til…"
+        }
+        socket.connect(url: url)
     }
 
     private func syncRoomName() {
@@ -607,6 +887,18 @@ final class WalkieSession: ObservableObject {
         static let speakerphone = "walkie.speakerphone"
         static let groups = "walkie.groups"
         static let talkGroup = "walkie.talkGroup"
+        static let username = "walkie.username"
+    }
+
+    private static func normalizeUsername(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private static func validUsername(_ user: String) -> Bool {
+        guard user.count >= 3, user.count <= 20 else { return false }
+        return user.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.username.unicodeScalars.contains(scalar)
+        }
     }
 
     private static func loadGroups(_ defaults: UserDefaults) -> [WalkieGroup] {
@@ -633,8 +925,99 @@ extension WalkieSession: ChannelSignaling {
 enum LinkState: Equatable {
     case disconnected
     case connecting
+    case signedIn
     case connected
     case reconnecting
+}
+
+struct AccountMember: Codable, Identifiable, Equatable {
+    var username: String
+    var name: String
+    var role: String
+    var id: String { username }
+
+    private enum CodingKeys: String, CodingKey {
+        case username, name, role
+    }
+
+    init(username: String, name: String, role: String) {
+        self.username = username
+        self.name = name
+        self.role = role
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        username = try container.decode(String.self, forKey: .username)
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        role = try container.decodeIfPresent(String.self, forKey: .role) ?? "member"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(username, forKey: .username)
+        try container.encode(name, forKey: .name)
+        try container.encode(role, forKey: .role)
+    }
+}
+
+struct ServerGroup: Decodable, Equatable {
+    var id: String
+    var name: String
+    var admin: Bool
+    var members: [AccountMember]
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, admin, members
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
+        admin = try container.decodeIfPresent(Bool.self, forKey: .admin) ?? false
+        members = try container.decodeIfPresent([AccountMember].self, forKey: .members) ?? []
+    }
+}
+
+struct WalkieInvite: Decodable, Identifiable, Equatable {
+    var room: String
+    var name: String
+    var from: String
+    var fromName: String
+    var id: String { room }
+
+    private enum CodingKeys: String, CodingKey {
+        case room, name, from, fromName
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        room = try container.decodeIfPresent(String.self, forKey: .room) ?? ""
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? room
+        from = try container.decodeIfPresent(String.self, forKey: .from) ?? ""
+        fromName = try container.decodeIfPresent(String.self, forKey: .fromName) ?? from
+    }
+}
+
+struct WalkieRequest: Decodable, Identifiable, Equatable {
+    var room: String
+    var name: String
+    var username: String
+    var displayName: String
+    var id: String { room + "/" + username }
+
+    private enum CodingKeys: String, CodingKey {
+        case room, name, username, displayName
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        room = try container.decodeIfPresent(String.self, forKey: .room) ?? ""
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? room
+        username = try container.decode(String.self, forKey: .username)
+        displayName = try container.decodeIfPresent(String.self, forKey: .displayName) ?? username
+    }
 }
 
 struct WalkieGroup: Codable, Identifiable, Equatable {
@@ -643,17 +1026,29 @@ struct WalkieGroup: Codable, Identifiable, Equatable {
     var listen: Bool
     var locked: Bool
     var setsPassword: Bool
+    var admin: Bool
+    var roster: [AccountMember]
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, listen, locked, setsPassword
+        case id, name, listen, locked, setsPassword, admin, roster
     }
 
-    init(id: String, name: String, listen: Bool, locked: Bool, setsPassword: Bool) {
+    init(
+        id: String,
+        name: String,
+        listen: Bool,
+        locked: Bool = false,
+        setsPassword: Bool = false,
+        admin: Bool = false,
+        roster: [AccountMember] = []
+    ) {
         self.id = id
         self.name = name
         self.listen = listen
         self.locked = locked
         self.setsPassword = setsPassword
+        self.admin = admin
+        self.roster = roster
     }
 
     init(from decoder: Decoder) throws {
@@ -663,6 +1058,8 @@ struct WalkieGroup: Codable, Identifiable, Equatable {
         listen = try container.decodeIfPresent(Bool.self, forKey: .listen) ?? true
         locked = try container.decodeIfPresent(Bool.self, forKey: .locked) ?? false
         setsPassword = try container.decodeIfPresent(Bool.self, forKey: .setsPassword) ?? false
+        admin = try container.decodeIfPresent(Bool.self, forKey: .admin) ?? false
+        roster = try container.decodeIfPresent([AccountMember].self, forKey: .roster) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -672,6 +1069,8 @@ struct WalkieGroup: Codable, Identifiable, Equatable {
         try container.encode(listen, forKey: .listen)
         try container.encode(locked, forKey: .locked)
         try container.encode(setsPassword, forKey: .setsPassword)
+        try container.encode(admin, forKey: .admin)
+        try container.encode(roster, forKey: .roster)
     }
 }
 
@@ -692,12 +1091,13 @@ struct OnlineMember: Identifiable, Equatable {
     var talking: Bool
 }
 
-enum GroupPasswordStore {
-    private static let service = "com.skuyng.walkie.group"
+enum AccountTokenStore {
+    private static let service = "com.skuyng.walkie.account"
+    private static let account = "session"
 
-    static func save(_ password: String, account: String) {
-        guard !account.isEmpty else { return }
-        let data = Data(password.utf8)
+    static func save(_ token: String) {
+        guard !token.isEmpty else { return }
+        let data = Data(token.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -716,8 +1116,7 @@ enum GroupPasswordStore {
         }
     }
 
-    static func load(account: String) -> String? {
-        guard !account.isEmpty else { return nil }
+    static func load() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -731,8 +1130,7 @@ enum GroupPasswordStore {
         return String(data: data, encoding: .utf8)
     }
 
-    static func delete(account: String) {
-        guard !account.isEmpty else { return }
+    static func delete() {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -740,4 +1138,8 @@ enum GroupPasswordStore {
         ]
         SecItemDelete(query as CFDictionary)
     }
+}
+
+private extension CharacterSet {
+    static let username = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789._-")
 }

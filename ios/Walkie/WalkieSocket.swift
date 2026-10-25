@@ -3,25 +3,19 @@ import os
 
 /// Events from the walkie server. Binary audio is delivered separately.
 enum ServerEvent {
+    case session(token: String, username: String, name: String)
+    case inbox(groups: [ServerGroup], invites: [WalkieInvite], requests: [WalkieRequest])
     case users(room: String, members: [RoomMember], selfID: String)
     case talkStarted(name: String, room: String, id: String)
     case talkStopped(name: String, room: String, id: String)
     case rejected(room: String, message: String)
 }
 
-struct GroupWire: Encodable {
-    var room: String
-    var password: String
-    var create: Bool
-    var listen: Bool
-}
-
 /// WebSocket client for the protocol in `server.js`.
 ///
-/// `{t:groups}` subscribes to several rooms. `{t:join}` still selects one room
-/// so an older server keeps working. `{t:start}` and `{t:stop}` include the
-/// talk room. Binary frames stay raw PCM16 and are only relayed to members
-/// who are allowed to hear that room.
+/// Sign in with `{t:signup}`, `{t:login}`, or `{t:resume}`. Membership, not a
+/// group password, decides who hears audio. `{t:start}` and `{t:stop}` include
+/// the talk room. Binary frames stay raw PCM16.
 final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
     var onOpen: (() -> Void)?
     var onClose: ((Error?) -> Void)?
@@ -73,12 +67,56 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
         previous.0?.cancel(with: .goingAway, reason: nil)
     }
 
-    func sendGroups(name: String, talk: String, groups: [GroupWire]) {
-        sendEncodable(GroupsOutbound(name: name, talk: talk, groups: groups))
+    func sendSignup(username: String, name: String, password: String) {
+        sendEncodable(Command(t: "signup", username: username, name: name, password: password))
     }
 
-    func sendJoin(name: String, room: String, password: String) {
-        sendEncodable(Outbound(t: "join", name: name, room: room, password: password))
+    func sendLogin(username: String, password: String) {
+        sendEncodable(Command(t: "login", username: username, password: password))
+    }
+
+    func sendResume(token: String) {
+        sendEncodable(Command(t: "resume", token: token))
+    }
+
+    func sendLogout(completion: (() -> Void)? = nil) {
+        sendEncodable(Command(t: "logout"), completion: completion)
+    }
+
+    func sendCreateGroup(name: String) {
+        sendEncodable(Command(t: "createGroup", name: name))
+    }
+
+    func sendInvite(room: String, username: String) {
+        sendEncodable(Command(t: "invite", username: username, room: room))
+    }
+
+    func sendInviteReply(room: String, accept: Bool) {
+        sendEncodable(Command(t: "inviteReply", room: room, accept: accept))
+    }
+
+    func sendRequestJoin(name: String) {
+        sendEncodable(Command(t: "requestJoin", name: name))
+    }
+
+    func sendRequestReply(room: String, username: String, accept: Bool) {
+        sendEncodable(Command(t: "requestReply", username: username, room: room, accept: accept))
+    }
+
+    func sendRemoveMember(room: String, username: String) {
+        sendEncodable(Command(t: "removeMember", username: username, room: room))
+    }
+
+    func sendLeave(room: String) {
+        sendEncodable(Command(t: "leave", room: room))
+    }
+
+    func sendDeleteGroup(room: String) {
+        sendEncodable(Command(t: "deleteGroup", room: room))
+    }
+
+    func sendSubscribe(talk: String, muted: [String]) {
+        sendEncodable(SubscribeCommand(talk: talk, muted: muted))
     }
 
     func sendStart(room: String) {
@@ -126,11 +164,22 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
         reportClose(of: socketTask, error: error)
     }
 
-    private func sendEncodable<Message: Encodable>(_ message: Message) {
+    private func sendEncodable<Message: Encodable>(_ message: Message, completion: (() -> Void)? = nil) {
+        let finish: () -> Void = {
+            guard let completion else { return }
+            DispatchQueue.main.async(execute: completion)
+        }
         guard let data = try? JSONEncoder().encode(message),
-              let text = String(data: data, encoding: .utf8) else { return }
+              let text = String(data: data, encoding: .utf8) else {
+            finish()
+            return
+        }
         let task = withLock { $0.task }
-        task?.send(.string(text)) { _ in }
+        guard let task else {
+            finish()
+            return
+        }
+        task.send(.string(text)) { _ in finish() }
     }
 
     private func receiveNext(on task: URLSessionWebSocketTask) {
@@ -210,6 +259,11 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
         guard let data = text.data(using: .utf8),
               let message = try? JSONDecoder().decode(Inbound.self, from: data) else { return nil }
         switch message.t {
+        case "session":
+            guard let token = message.token, let username = message.username else { return nil }
+            return .session(token: token, username: username, name: message.name ?? "")
+        case "inbox":
+            return .inbox(groups: message.groups ?? [], invites: message.invites ?? [], requests: message.requests ?? [])
         case "users":
             return .users(
                 room: message.room ?? "",
@@ -223,7 +277,7 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
             guard let name = message.name else { return nil }
             return .talkStopped(name: name, room: message.room ?? "", id: message.id ?? name)
         case "error":
-            let messageText = message.error ?? "Feil passord"
+            let messageText = message.error ?? "Noe gikk galt"
             return .rejected(room: message.room ?? "", message: messageText)
         default:
             return nil
@@ -251,27 +305,34 @@ private final class SocketState {
     var pingTimer: DispatchSourceTimer?
 }
 
-private struct GroupsOutbound: Encodable {
-    var t = "groups"
-    var name: String
+private struct SubscribeCommand: Encodable {
+    var t = "subscribe"
     var talk: String
-    var groups: [GroupWire]
+    var muted: [String]
 }
 
-private struct Outbound: Encodable {
+private struct Command: Encodable {
     var t: String
+    var username: String?
     var name: String?
-    var room: String?
     var password: String?
+    var token: String?
+    var room: String?
+    var accept: Bool?
 
-    enum CodingKeys: String, CodingKey { case t, name, room, password }
+    enum CodingKeys: String, CodingKey {
+        case t, username, name, password, token, room, accept
+    }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(t, forKey: .t)
+        try container.encodeIfPresent(username, forKey: .username)
         try container.encodeIfPresent(name, forKey: .name)
-        try container.encodeIfPresent(room, forKey: .room)
         try container.encodeIfPresent(password, forKey: .password)
+        try container.encodeIfPresent(token, forKey: .token)
+        try container.encodeIfPresent(room, forKey: .room)
+        try container.encodeIfPresent(accept, forKey: .accept)
     }
 }
 
@@ -284,9 +345,19 @@ private struct Inbound: Decodable {
     var error: String?
     var id: String?
     var me: String?
+    var token: String?
+    var username: String?
+    var groups: [ServerGroup]?
+    var invites: [WalkieInvite]?
+    var requests: [WalkieRequest]?
 
     enum CodingKeys: String, CodingKey {
-        case t, name, users, members, room, error, id
+        case t, name, users, members, room, error, id, token, username, groups, invites, requests
         case me = "self"
     }
+}
+
+private struct Outbound: Encodable {
+    var t: String
+    var room: String
 }
