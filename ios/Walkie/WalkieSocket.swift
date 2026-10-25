@@ -26,6 +26,8 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
     var onEvent: ((ServerEvent) -> Void)?
     var onAudio: ((Data) -> Void)?
 
+    private static let maxAudioInFlight = 32
+
     private let log = Logger(subsystem: "com.skuyng.walkie", category: "socket")
     private let lock = NSLock()
     private let state = SocketState()
@@ -45,6 +47,7 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
             let existing = state.task
             state.task = nil
             state.closeReported = true
+            state.audioInFlight = 0
             return existing
         }
         previous?.cancel(with: .goingAway, reason: nil)
@@ -65,6 +68,7 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
             state.task = nil
             state.pingTimer = nil
             state.closeReported = true
+            state.audioInFlight = 0
             return (task, timer)
         }
         previous.1?.cancel()
@@ -173,8 +177,18 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
     }
 
     func send(audio: Data) {
-        let task = withLock { $0.task }
-        task?.send(.data(audio)) { _ in }
+        let task = withLock { state -> URLSessionWebSocketTask? in
+            guard state.audioInFlight < Self.maxAudioInFlight, let task = state.task else { return nil }
+            state.audioInFlight += 1
+            return task
+        }
+        guard let task else { return }
+        task.send(.data(audio)) { [weak self] _ in
+            guard let self else { return }
+            self.withLock { state in
+                state.audioInFlight = max(0, state.audioInFlight - 1)
+            }
+        }
     }
 
     func urlSession(
@@ -259,7 +273,10 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
             guard let self, let task else { return }
             let current = self.withLock { $0.task }
             guard current === task else { return }
-            task.sendPing { _ in }
+            task.sendPing { [weak self] error in
+                guard let self, error != nil else { return }
+                self.reportClose(of: task, error: error)
+            }
         }
         var replaced: DispatchSourceTimer?
         let accepted = withLock { state -> Bool in
@@ -281,6 +298,7 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
             guard state.task === task, !state.closeReported else { return false }
             state.closeReported = true
             state.task = nil
+            state.audioInFlight = 0
             return true
         }
         guard shouldReport else { return }
@@ -364,6 +382,7 @@ private final class SocketState {
     var task: URLSessionWebSocketTask?
     var closeReported = false
     var pingTimer: DispatchSourceTimer?
+    var audioInFlight = 0
 }
 
 private struct SubscribeCommand: Encodable {

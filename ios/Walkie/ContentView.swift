@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
-    @StateObject private var session = WalkieSession()
+    @State private var session = WalkieSession()
     @Environment(\.scenePhase) private var scenePhase
     @State private var darkMode = false
     @State private var savedBrightness: CGFloat?
@@ -19,7 +19,7 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            AuroraBackground(live: auroraLive)
+            AuroraBackground(live: auroraLive, moving: scenePhase == .active && !darkMode)
             if session.signedIn || session.restoringSession {
                 talkScreen
             } else {
@@ -34,7 +34,8 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .tint(Aurora.teal)
         .environment(\.locale, session.language.locale)
-        .task {
+        .task(id: scenePhase == .background) {
+            guard scenePhase != .background else { return }
             while !Task.isCancelled {
                 session.haptics.prepare()
                 try? await Task.sleep(for: .seconds(1.5))
@@ -97,13 +98,13 @@ struct ContentView: View {
         .sheet(isPresented: $showMenu) {
             HomeMenu(session: session)
                 .presentationBackground {
-                    AuroraBackground(live: auroraLive)
+                    AuroraBackground(live: auroraLive, moving: scenePhase == .active && !darkMode)
                 }
         }
         .sheet(item: $channelSheet) { flow in
             ChannelFlowSheet(session: session, flow: flow)
                 .presentationBackground {
-                    AuroraBackground(live: auroraLive)
+                    AuroraBackground(live: auroraLive, moving: scenePhase == .active && !darkMode)
                 }
         }
         .confirmationDialog(leaveDialogTitle, isPresented: $confirmLeave, titleVisibility: .visible) {
@@ -175,7 +176,8 @@ struct ContentView: View {
                     rect: rect,
                     wave: session.levels.wave,
                     transmitting: session.isTalking,
-                    receiving: !session.isTalking && session.hearingThisChannel
+                    receiving: !session.isTalking && session.hearingThisChannel,
+                    painting: scenePhase == .active && !darkMode
                 )
             }
             .overlay(alignment: .bottom) {
@@ -546,11 +548,12 @@ private struct WaveOverlay: View {
     var wave: WaveRing
     var transmitting: Bool
     var receiving: Bool
+    var painting: Bool
 
     var body: some View {
         if rect.width > 1 {
             ZStack {
-                TalkLevelFill(wave: wave, transmitting: transmitting, receiving: receiving)
+                TalkLevelFill(wave: wave, transmitting: transmitting, receiving: receiving, painting: painting)
                 Text("Talk")
                     .font(.title2.weight(.semibold))
                     .lineLimit(1)
@@ -568,7 +571,7 @@ private struct WaveOverlay: View {
 }
 
 private struct TalkButton: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     var side: CGFloat
     @State private var actions = TalkActions()
 
@@ -667,7 +670,7 @@ private enum HomeLink: Equatable {
 }
 
 private struct HomePresence: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
 
     var body: some View {
         VStack(spacing: 8) {
@@ -885,7 +888,7 @@ private enum ChannelPresence {
 
 /// Glass list anchored under the channel pill. The scrim is full-screen so a tap outside closes it.
 private struct ChannelMenuPopover: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     var anchor: CGRect
     var bounds: CGSize
     var onDismiss: () -> Void
@@ -1051,7 +1054,7 @@ private enum ChannelFlow: Identifiable {
 }
 
 private struct ChannelFlowSheet: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     var flow: ChannelFlow
     @Environment(\.dismiss) private var dismiss
 
@@ -1126,7 +1129,7 @@ private struct ChannelMenuAction: View {
 }
 
 private struct ChannelMenuRow: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let group: WalkieGroup
     var selected: Bool
     var action: () -> Void
@@ -1228,7 +1231,7 @@ private struct ChannelMenuRow: View {
 }
 
 private struct TalkBottomBar: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     var link: HomeLink
     var volumeOpen: Bool
     var onSpeaker: () -> Void
@@ -1359,7 +1362,7 @@ private struct VolumePlacement {
 /// Full-screen layer so the slider's frame sits inside a parent that can hit-test it.
 /// The track stays in the leading margin, between the channel pill and the bottom bar.
 private struct ListenVolumePopover: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     var bounds: CGSize
     var pill: CGRect
     var bar: CGRect
@@ -1444,7 +1447,7 @@ private final class VolumeDragActions {
 }
 
 private struct VerticalListenSlider: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     var trackHeight: CGFloat
     var onInteract: () -> Void
     @State private var actions = VolumeDragActions()
@@ -1567,7 +1570,7 @@ private struct TalkIconButton: View {
 }
 
 private struct HomeMenu: View {
-    @ObservedObject var session: WalkieSession
+    @Bindable var session: WalkieSession
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -1679,7 +1682,7 @@ private struct HomeMenu: View {
 }
 
 private struct QuietHoursSection: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1737,7 +1740,7 @@ private struct SettingsBlock<Content: View>: View {
 }
 
 private struct LoginWindow: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     @State private var username = ""
     @State private var password = ""
     @State private var showSignUp = false
@@ -1868,7 +1871,7 @@ private struct LoginWindow: View {
 }
 
 private struct SignUpWindow: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     var onClose: () -> Void
     @State private var username = ""
     @State private var displayName = ""
@@ -1976,7 +1979,7 @@ private struct SignUpWindow: View {
 }
 
 private struct GroupEditor: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     var createOnly = false
     var onCreated: (@MainActor () -> Void)? = nil
     @State private var draftName = ""
@@ -2042,7 +2045,7 @@ private struct GroupEditor: View {
 }
 
 private struct InviteSection: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
 
     var body: some View {
         if session.invites.isEmpty {
@@ -2061,7 +2064,7 @@ private struct InviteSection: View {
 }
 
 private struct InviteRow: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let invite: WalkieInvite
 
     var body: some View {
@@ -2125,7 +2128,7 @@ private struct CapsuleChoice: View {
 }
 
 private struct DirectSection: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     var searchOnly = false
     @State private var username = ""
     @State private var fieldHeight: CGFloat = 52
@@ -2183,7 +2186,7 @@ private struct DirectSection: View {
 }
 
 private struct UserMatchRow: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let match: UserMatch
 
     var body: some View {
@@ -2244,7 +2247,7 @@ private struct UserMatchRow: View {
 }
 
 private struct DirectRequestRow: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let request: DirectRequest
 
     var body: some View {
@@ -2286,7 +2289,7 @@ private struct DirectRequestRow: View {
 }
 
 private struct GroupList: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2298,7 +2301,7 @@ private struct GroupList: View {
 }
 
 private struct GroupRow: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let group: WalkieGroup
     @State private var confirmDirect = false
     @State private var confirmReport = false
@@ -2433,7 +2436,7 @@ private struct GroupRow: View {
 }
 
 private struct InviteComposer: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let room: String
     @State private var inviteName = ""
 
@@ -2457,7 +2460,7 @@ private struct InviteComposer: View {
 }
 
 private struct AdminTools: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let group: WalkieGroup
 
     var body: some View {
@@ -2476,7 +2479,7 @@ private struct AdminTools: View {
 }
 
 private struct PasswordEditor: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let groupID: String
     let locked: Bool
     @State private var password = ""
@@ -2518,7 +2521,7 @@ private struct PasswordEditor: View {
 }
 
 private struct RequestRow: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let request: WalkieRequest
 
     var body: some View {
@@ -2541,7 +2544,7 @@ private struct RequestRow: View {
 }
 
 private struct RosterList: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let group: WalkieGroup
 
     var body: some View {
@@ -2554,7 +2557,7 @@ private struct RosterList: View {
 }
 
 private struct RosterLine: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let groupID: String
     let member: AccountMember
     let admin: Bool
@@ -2648,7 +2651,7 @@ private struct LegalLinks: View {
 }
 
 private struct AccountFooter: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     var onLogOut: () -> Void
     @State private var confirmDelete = false
 
@@ -2672,7 +2675,7 @@ private struct AccountFooter: View {
 }
 
 private struct MemberList: View {
-    @ObservedObject var session: WalkieSession
+    var session: WalkieSession
     let groupID: String
 
     var body: some View {

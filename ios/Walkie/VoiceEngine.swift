@@ -73,6 +73,8 @@ final class VoiceEngine {
     private var playbackFormat: AVAudioFormat?
     private var encoder: FormatConverter?
     private var encoderInputKey: String?
+    private var encoderScratch: AVAudioPCMBuffer?
+    private var wireScratch: AVAudioPCMBuffer?
     private var decoder: FormatConverter?
     private var shouldRun = false
     private var tapInstalled = false
@@ -837,12 +839,27 @@ final class VoiceEngine {
             throw VoiceEngineError.noInput
         }
         let ring = levelMeter
+        let copies = MicCopies(format: inputFormat, frames: 8_192)
         engine.inputNode.installTap(onBus: 0, bufferSize: 256, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
             if self.waveArmed.load() != 0 {
                 ring?.writeMic(buffer)
             }
-            self.handleInput(buffer)
+            guard self.micOpen.withLock({ $0 }), buffer.frameLength > 0 else { return }
+            guard let slot = copies.pushCopy(of: buffer) else { return }
+            self.queue.async { [weak self] in
+                guard let self else {
+                    copies.release()
+                    return
+                }
+                if self.shouldRun, let data = self.encode(slot), !data.isEmpty {
+                    self.handlerLock.lock()
+                    let handler = self.capture
+                    self.handlerLock.unlock()
+                    handler?(data)
+                }
+                copies.release()
+            }
         }
         tapInstalled = true
         engine.prepare()
@@ -876,6 +893,8 @@ final class VoiceEngine {
         self.voiceProcessingOn = false
         self.encoder = nil
         self.encoderInputKey = nil
+        self.encoderScratch = nil
+        self.wireScratch = nil
         self.burstStarted = false
         self.primeBuffers.removeAll()
         self.primeTimer?.cancel()
@@ -967,6 +986,8 @@ final class VoiceEngine {
         decoder = nil
         encoder = nil
         encoderInputKey = nil
+        encoderScratch = nil
+        wireScratch = nil
         primeTimer?.cancel()
         primeTimer = nil
         primeBuffers.removeAll()
@@ -977,19 +998,6 @@ final class VoiceEngine {
         playingClip = false
         clipGeneration += 1
         playbackGain = 1
-    }
-
-    private func handleInput(_ buffer: AVAudioPCMBuffer) {
-        guard micOpen.withLock({ $0 }), buffer.frameLength > 0 else { return }
-        guard let copy = Self.copyBuffer(buffer) else { return }
-        queue.async { [weak self] in
-            guard let self else { return }
-            guard self.shouldRun, let data = self.encode(copy), !data.isEmpty else { return }
-            self.handlerLock.lock()
-            let handler = self.capture
-            self.handlerLock.unlock()
-            handler?(data)
-        }
     }
 
     private func currentLevelMeter() -> WaveRing? {
@@ -1004,30 +1012,14 @@ final class VoiceEngine {
         if encoder == nil || encoderInputKey != key {
             encoder = FormatConverter(from: buffer.format, to: Self.wireFormat)
             encoderInputKey = key
+            encoderScratch = nil
         }
-        if let converted = encoder?.convert(buffer),
+        if let converted = encoder?.convert(buffer, reusing: &encoderScratch),
            let channel = converted.floatChannelData,
            converted.frameLength > 0 {
-            let count = Int(converted.frameLength)
-            let samples = Array(UnsafeBufferPointer(start: channel[0], count: count))
-            return PCM16.encode(limitForWire(samples))
+            return PCM16.encodeLimited(channel[0], count: Int(converted.frameLength))
         }
         return encodeNearest(buffer)
-    }
-
-    /// Soft knee before the PCM16 clip, so loudspeaker peaks are not squared off.
-    private func limitForWire(_ samples: [Float]) -> [Float] {
-        let knee: Float = 0.7
-        let ceiling: Float = 0.98
-        let span = 1 - knee
-        return samples.map { sample in
-            guard sample.isFinite else { return 0 }
-            let sign: Float = sample < 0 ? -1 : 1
-            let magnitude = abs(sample)
-            if magnitude <= knee { return sample }
-            let compressed = knee + span * (1 - exp(-(magnitude - knee) / span))
-            return sign * min(ceiling, compressed)
-        }
     }
 
     /// Same point-sampling the browser uses, if `AVAudioConverter` cannot run.
@@ -1048,13 +1040,16 @@ final class VoiceEngine {
             }
             samples[index] = sum / Float(channelCount)
         }
-        return PCM16.encode(limitForWire(samples))
+        return samples.withUnsafeMutableBufferPointer { pointer in
+            guard let base = pointer.baseAddress else { return Data() }
+            return PCM16.encodeLimited(base, count: pointer.count)
+        }
     }
 
     private func playIncomingOnQueue(_ data: Data) {
         guard shouldRun, let decoder, let player = voicePlayer, let expected = playbackFormat else { return }
         let bytes = data.prefix(64_000)
-        guard let wire = Self.wireBuffer(fromPCM16: bytes), let playback = decoder.convert(wire) else { return }
+        guard let wire = wireBuffer(fromPCM16: bytes), let playback = decoder.convert(wire) else { return }
         currentLevelMeter()?.writeRemote(wire)
         guard abs(playback.format.sampleRate - expected.sampleRate) < 1,
               playback.format.channelCount == expected.channelCount else { return }
@@ -1188,7 +1183,7 @@ final class VoiceEngine {
             let end = min(offset + chunkBytes, total)
             let slice = pcm.subdata(in: offset..<end)
             offset = end
-            guard let wire = Self.wireBuffer(fromPCM16: slice), let playback = decoder.convert(wire) else { continue }
+            guard let wire = wireBuffer(fromPCM16: slice), let playback = decoder.convert(wire) else { continue }
             normalizePlayback(playback)
             if offset >= total {
                 player.scheduleBuffer(playback, at: nil, options: [], completionCallbackType: .dataPlayedBack) { [weak self] _ in
@@ -1335,34 +1330,30 @@ final class VoiceEngine {
         return buffer
     }
 
-    private static func wireBuffer(fromPCM16 data: Data) -> AVAudioPCMBuffer? {
-        let samples = PCM16.decode(data)
-        guard !samples.isEmpty else { return nil }
-        let frames = AVAudioFrameCount(samples.count)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: wireFormat, frameCapacity: frames),
-              let channel = buffer.floatChannelData else { return nil }
+    /// Reused across packets. Callers finish reading it before the next packet.
+    private func wireBuffer(fromPCM16 data: Data) -> AVAudioPCMBuffer? {
+        let count = data.count / MemoryLayout<Int16>.size
+        guard count > 0 else { return nil }
+        let frames = AVAudioFrameCount(count)
+        let buffer: AVAudioPCMBuffer
+        if let wireScratch, wireScratch.frameCapacity >= frames {
+            buffer = wireScratch
+        } else {
+            guard let created = AVAudioPCMBuffer(pcmFormat: Self.wireFormat, frameCapacity: frames) else { return nil }
+            wireScratch = created
+            buffer = created
+        }
         buffer.frameLength = frames
-        samples.withUnsafeBufferPointer { pointer in
-            guard let base = pointer.baseAddress else { return }
-            channel[0].update(from: base, count: samples.count)
+        guard let channel = buffer.floatChannelData else { return nil }
+        let dest = channel[0]
+        data.withUnsafeBytes { raw in
+            let ints = raw.bindMemory(to: Int16.self)
+            guard let source = ints.baseAddress else { return }
+            for index in 0..<count {
+                dest[index] = Float(source[index]) / 32_768
+            }
         }
         return buffer
-    }
-
-    private static func copyBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        let frames = buffer.frameLength
-        guard frames > 0,
-              let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: frames) else { return nil }
-        copy.frameLength = frames
-        let source = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
-        let destination = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
-        guard source.count == destination.count else { return nil }
-        for index in source.indices {
-            let byteCount = min(Int(source[index].mDataByteSize), Int(destination[index].mDataByteSize))
-            guard byteCount > 0, let src = source[index].mData, let dst = destination[index].mData else { continue }
-            dst.copyMemory(from: src, byteCount: byteCount)
-        }
-        return copy
     }
 
     @discardableResult
@@ -1491,6 +1482,62 @@ final class VoiceEngine {
     }
 }
 
+/// Preallocated mic copies so the input tap never allocates.
+private final class MicCopies: @unchecked Sendable {
+    private struct Cursor: Sendable {
+        var write = 0
+        var read = 0
+    }
+
+    private let slots: [AVAudioPCMBuffer]
+    private let state = OSAllocatedUnfairLock(initialState: Cursor())
+
+    init(format: AVAudioFormat, frames: AVAudioFrameCount, count: Int = 8) {
+        var made: [AVAudioPCMBuffer] = []
+        made.reserveCapacity(count)
+        for _ in 0..<count {
+            if let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) {
+                made.append(buffer)
+            }
+        }
+        slots = made
+    }
+
+    func pushCopy(of buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        state.withLock { cursor in
+            if slots.isEmpty || cursor.write - cursor.read >= slots.count { return nil }
+            let dest = slots[cursor.write % slots.count]
+            guard Self.copy(buffer, into: dest) else { return nil }
+            cursor.write += 1
+            return dest
+        }
+    }
+
+    func release() {
+        state.withLock { cursor in
+            if cursor.read < cursor.write {
+                cursor.read += 1
+            }
+        }
+    }
+
+    private static func copy(_ buffer: AVAudioPCMBuffer, into dest: AVAudioPCMBuffer) -> Bool {
+        let frames = buffer.frameLength
+        guard frames > 0, frames <= dest.frameCapacity else { return false }
+        dest.frameLength = frames
+        let source = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let destination = UnsafeMutableAudioBufferListPointer(dest.mutableAudioBufferList)
+        guard source.count == destination.count else { return false }
+        for index in source.indices {
+            guard let src = source[index].mData, let dst = destination[index].mData else { continue }
+            let byteCount = min(Int(source[index].mDataByteSize), Int(destination[index].mDataByteSize))
+            guard byteCount > 0 else { continue }
+            dst.copyMemory(from: src, byteCount: byteCount)
+        }
+        return true
+    }
+}
+
 private final class FormatConverter {
     private let converter: AVAudioConverter
 
@@ -1502,12 +1549,26 @@ private final class FormatConverter {
     }
 
     func convert(_ input: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        var scratch: AVAudioPCMBuffer?
+        return convert(input, reusing: &scratch)
+    }
+
+    /// `reusing` keeps the uplink buffer. Playback must pass a fresh slot so a queued buffer is not overwritten.
+    func convert(_ input: AVAudioPCMBuffer, reusing scratch: inout AVAudioPCMBuffer?) -> AVAudioPCMBuffer? {
         guard input.frameLength > 0 else { return nil }
         let ratio = converter.outputFormat.sampleRate / converter.inputFormat.sampleRate
         let estimate = Double(input.frameLength) * ratio
         let capacity = AVAudioFrameCount(max(32.0, estimate.rounded(.up) + 32.0))
-        guard let output = AVAudioPCMBuffer(pcmFormat: converter.outputFormat, frameCapacity: capacity) else {
-            return nil
+        let output: AVAudioPCMBuffer
+        if let scratch, scratch.frameCapacity >= capacity {
+            output = scratch
+            output.frameLength = 0
+        } else {
+            guard let created = AVAudioPCMBuffer(pcmFormat: converter.outputFormat, frameCapacity: capacity) else {
+                return nil
+            }
+            scratch = created
+            output = created
         }
         var supplied = false
         var error: NSError?

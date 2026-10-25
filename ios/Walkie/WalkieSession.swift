@@ -1,46 +1,47 @@
 import AVFoundation
-import Combine
 import Foundation
 import MediaPlayer
+import Observation
 import Security
 
 @MainActor
-final class WalkieSession: ObservableObject {
+@Observable
+final class WalkieSession {
     static let defaultServerURL = "wss://walkie-bc0z.onrender.com"
 
-    @Published var name: String
+    var name: String
     /// Display name of the selected talk group. Kept so older saved channels still load.
-    @Published var room: String
-    @Published var serverURL: String
-    @Published var groups: [WalkieGroup]
-    @Published var talkGroup: String
-    @Published private(set) var linkState: LinkState = .disconnected
-    @Published private(set) var statusCode: LinkCopy = .disconnected
-    @Published private(set) var membersByRoom: [String: [RoomMember]] = [:]
-    @Published private(set) var selfID = ""
-    @Published private(set) var joinProblems: [String: String] = [:]
-    @Published private(set) var talkers: [Talker] = []
-    @Published private(set) var isTalking = false
-    @Published private(set) var audioReady = false
-    @Published private(set) var errorNotice: AppNotice?
-    @Published private(set) var suggestsSettings = false
-    @Published private(set) var hasConnectedOnce = false
-    @Published private(set) var listenOutput: ListenOutput
-    @Published private(set) var listenGain: Double
-    @Published private(set) var userMatches: [UserMatch] = []
-    @Published private(set) var contactNote = ""
-    @Published private(set) var signedIn = false
-    @Published private(set) var restoringSession = false
-    @Published private(set) var accountUsername = ""
-    @Published private(set) var invites: [WalkieInvite] = []
-    @Published private(set) var requests: [WalkieRequest] = []
-    @Published private(set) var blockedUsernames: [String] = []
-    @Published private(set) var directRequests: [DirectRequest] = []
-    @Published var quietHoursEnabled = false
-    @Published var quietFromMinutes = 22 * 60
-    @Published var quietToMinutes = 7 * 60
-    @Published private(set) var heardClips: [String: HeardClip] = [:]
-    @Published private(set) var language: AppLanguage = .nb
+    var room: String
+    var serverURL: String
+    var groups: [WalkieGroup]
+    var talkGroup: String
+    private(set) var linkState: LinkState = .disconnected
+    private(set) var statusCode: LinkCopy = .disconnected
+    private(set) var membersByRoom: [String: [RoomMember]] = [:]
+    private(set) var selfID = ""
+    private(set) var joinProblems: [String: String] = [:]
+    private(set) var talkers: [Talker] = []
+    private(set) var isTalking = false
+    private(set) var audioReady = false
+    private(set) var errorNotice: AppNotice?
+    private(set) var suggestsSettings = false
+    private(set) var hasConnectedOnce = false
+    private(set) var listenOutput: ListenOutput
+    private(set) var listenGain: Double
+    private(set) var userMatches: [UserMatch] = []
+    private(set) var contactNote = ""
+    private(set) var signedIn = false
+    private(set) var restoringSession = false
+    private(set) var accountUsername = ""
+    private(set) var invites: [WalkieInvite] = []
+    private(set) var requests: [WalkieRequest] = []
+    private(set) var blockedUsernames: [String] = []
+    private(set) var directRequests: [DirectRequest] = []
+    var quietHoursEnabled = false
+    var quietFromMinutes = 22 * 60
+    var quietToMinutes = 7 * 60
+    private(set) var heardClips: [String: HeardClip] = [:]
+    private(set) var language: AppLanguage = .nb
 
     var statusText: String {
         L10n.text(statusCode.key, language)
@@ -172,9 +173,8 @@ final class WalkieSession: ObservableObject {
     private var preferTalk: String?
     private var reconnectAttempt = 0
     private var quietTimer: Timer?
-    private var openHeard: [String: OpenHeard] = [:]
+    private let heard = HeardRecorder()
     private var heardAudio: [String: Data] = [:]
-    private var pendingHeard = Data()
 
     private enum PendingAuth {
         case signup(user: String, display: String, password: String)
@@ -224,14 +224,12 @@ final class WalkieSession: ObservableObject {
         socket.onEvent = { [weak self] event in
             Task { @MainActor in self?.handle(event) }
         }
+        let recorder = heard
         socket.onAudio = { [weak self] data in
             guard let self else { return }
             guard self.engine.acceptsInboundAudio() else { return }
             self.engine.playIncoming(data)
-            let captured = data
-            Task { @MainActor [weak self] in
-                self?.rememberIncoming(captured)
-            }
+            recorder.append(data)
         }
         engine.setCaptureHandler { [weak self] data in
             self?.socket.send(audio: data)
@@ -631,7 +629,7 @@ final class WalkieSession: ObservableObject {
         groups.removeAll { $0.id == id }
         membersByRoom[id] = nil
         joinProblems[id] = nil
-        openHeard[id] = nil
+        heard.drop(room: id)
         heardAudio[id] = nil
         heardClips[id] = nil
         let leaving = talkers.filter { $0.room == id }
@@ -662,7 +660,7 @@ final class WalkieSession: ObservableObject {
         groups.removeAll { $0.id == id }
         membersByRoom[id] = nil
         joinProblems[id] = nil
-        openHeard[id] = nil
+        heard.drop(room: id)
         heardAudio[id] = nil
         heardClips[id] = nil
         let leaving = talkers.filter { $0.room == id }
@@ -1028,6 +1026,8 @@ final class WalkieSession: ObservableObject {
             engine.playTalkBoundaryBeep(isStart: false)
         }
         engine.markTalkBurstEnded()
+        syncHeardRooms()
+        heard.dropPending()
         endTransmitting()
         let wantsAudio = shouldReconnect
         let wantsAccount = keepAccount
@@ -1105,11 +1105,15 @@ final class WalkieSession: ObservableObject {
         case .users(let room, let members, let selfID):
             let key = room.isEmpty ? talkGroup : room
             guard !key.isEmpty else { return }
-            if !selfID.isEmpty { self.selfID = selfID }
-            membersByRoom[key] = members
+            if !selfID.isEmpty, self.selfID != selfID { self.selfID = selfID }
+            if membersByRoom[key] != members {
+                membersByRoom[key] = members
+            }
             if includesSelf(members) {
-                joinProblems[key] = nil
-            } else if linkState == .connected {
+                if joinProblems[key] != nil {
+                    joinProblems[key] = nil
+                }
+            } else if linkState == .connected, joinProblems[key] != "Ikke med i gruppen" {
                 joinProblems[key] = "Ikke med i gruppen"
             }
             let gone = talkers.filter { talker in
@@ -1125,7 +1129,7 @@ final class WalkieSession: ObservableObject {
             let channel = room.isEmpty ? talkGroup : room
             guard channel == talkGroup else {
                 engine.noteInboundTalk(room: channel, started: true)
-                pendingHeard.removeAll(keepingCapacity: true)
+                heard.dropPending()
                 return
             }
             engine.noteInboundTalk(room: channel, started: true)
@@ -1205,6 +1209,7 @@ final class WalkieSession: ObservableObject {
         selfID = ""
         talkers = []
         joinProblems = [:]
+        syncHeardRooms()
     }
 
     private func startQuietClock() {
@@ -1213,6 +1218,7 @@ final class WalkieSession: ObservableObject {
                 self?.applyQuietHours()
             }
         }
+        timer.tolerance = 10
         RunLoop.main.add(timer, forMode: .common)
         quietTimer = timer
     }
@@ -1301,33 +1307,14 @@ final class WalkieSession: ObservableObject {
         return Calendar.current.date(from: parts) ?? Date()
     }
 
-    private func rememberIncoming(_ data: Data) {
-        guard !data.isEmpty else { return }
+    private func syncHeardRooms() {
         var rooms: [String: [String]] = [:]
         for talker in talkers {
             if isLocalTalker(id: talker.id, name: talker.name) { continue }
             guard !talker.room.isEmpty else { continue }
             rooms[talker.room, default: []].append(talker.name)
         }
-        if rooms.isEmpty {
-            Self.appendHeard(&pendingHeard, data, limit: Self.leadHeardBytes)
-            return
-        }
-        let lead = pendingHeard
-        if !lead.isEmpty {
-            pendingHeard.removeAll(keepingCapacity: true)
-        }
-        for (room, names) in rooms {
-            var open = openHeard[room] ?? OpenHeard()
-            if open.data.isEmpty, !lead.isEmpty {
-                Self.appendHeard(&open.data, lead, limit: Self.maxHeardBytes)
-            }
-            for name in names where !name.isEmpty && !open.names.contains(name) {
-                open.names.append(name)
-            }
-            Self.appendHeard(&open.data, data, limit: Self.maxHeardBytes)
-            openHeard[room] = open
-        }
+        heard.setActive(rooms)
     }
 
     private func remoteStillTalking(in room: String) -> Bool {
@@ -1335,38 +1322,22 @@ final class WalkieSession: ObservableObject {
     }
 
     private func finishHeardClip(_ room: String) {
-        guard let open = openHeard.removeValue(forKey: room) else { return }
-        guard open.data.count >= 3_200, !open.names.isEmpty else { return }
-        heardAudio[room] = open.data
-        heardClips[room] = HeardClip(sender: open.names.joined(separator: ", "), at: Date())
+        guard let clip = heard.finish(room: room) else { return }
+        heardAudio[room] = clip.data
+        heardClips[room] = HeardClip(sender: clip.sender, at: Date())
     }
 
     private func finishAllHeardClips() {
-        for room in Array(openHeard.keys) {
-            finishHeardClip(room)
+        for clip in heard.finishAll() {
+            heardAudio[clip.room] = clip.data
+            heardClips[clip.room] = HeardClip(sender: clip.sender, at: Date())
         }
     }
 
     private func clearHeard() {
-        openHeard.removeAll()
-        pendingHeard.removeAll()
+        heard.clear()
         heardAudio.removeAll()
         heardClips = [:]
-    }
-
-    private static let maxHeardBytes = 45 * 32_000
-    private static let leadHeardBytes = 16_000
-
-    private static func appendHeard(_ buffer: inout Data, _ more: Data, limit: Int) {
-        buffer.append(more)
-        if buffer.count <= limit { return }
-        var drop = buffer.count - limit
-        if drop % 2 != 0 { drop += 1 }
-        if drop >= buffer.count {
-            buffer.removeAll(keepingCapacity: true)
-            return
-        }
-        buffer.removeFirst(drop)
     }
 
     private func addTalker(id: String, name: String, room: String) {
@@ -1381,6 +1352,7 @@ final class WalkieSession: ObservableObject {
         if !local {
             haptics.remoteStarted()
         }
+        syncHeardRooms()
     }
 
     private func removeTalker(id: String, room: String) {
@@ -1395,6 +1367,7 @@ final class WalkieSession: ObservableObject {
         if !local {
             haptics.remoteStopped()
         }
+        syncHeardRooms()
         if !remoteStillTalking(in: room) {
             finishHeardClip(room)
         }
@@ -1452,8 +1425,8 @@ final class WalkieSession: ObservableObject {
         engine.setInboundChannel(talkGroup)
         let keep = talkGroup
         talkers.removeAll { $0.room != keep }
-        openHeard = openHeard.filter { $0.key == keep }
-        pendingHeard.removeAll(keepingCapacity: true)
+        heard.park(keeping: keep)
+        syncHeardRooms()
         if talkers.isEmpty {
             engine.markTalkBurstEnded()
         }
@@ -1888,9 +1861,146 @@ struct HeardClip: Equatable {
     var at: Date
 }
 
-private struct OpenHeard {
+private struct HeardChunks {
+    var chunks: [Data] = []
+    var bytes = 0
     var names: [String] = []
-    var data = Data()
+
+    mutating func append(_ data: Data, limit: Int) {
+        guard !data.isEmpty else { return }
+        chunks.append(data)
+        bytes += data.count
+        while bytes > limit, !chunks.isEmpty {
+            let extra = bytes - limit
+            if chunks[0].count <= extra {
+                bytes -= chunks.removeFirst().count
+            } else {
+                var drop = extra
+                if drop % 2 != 0 { drop += 1 }
+                if drop >= chunks[0].count {
+                    bytes -= chunks.removeFirst().count
+                } else {
+                    chunks[0] = Data(chunks[0].dropFirst(drop))
+                    bytes -= drop
+                }
+            }
+        }
+    }
+
+    mutating func takeData() -> Data {
+        let data = joined()
+        chunks.removeAll(keepingCapacity: true)
+        bytes = 0
+        return data
+    }
+
+    func joined() -> Data {
+        if chunks.count == 1, let only = chunks.first { return only }
+        var data = Data()
+        data.reserveCapacity(bytes)
+        for chunk in chunks {
+            data.append(chunk)
+        }
+        return data
+    }
+}
+
+/// Replay audio is appended off the main thread. SwiftUI hears it only when a clip finishes.
+private final class HeardRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending = HeardChunks()
+    private var open: [String: HeardChunks] = [:]
+    private var active: [String: [String]] = [:]
+    private static let leadLimit = 16_000
+    private static let clipLimit = 45 * 32_000
+
+    func setActive(_ rooms: [String: [String]]) {
+        lock.lock()
+        active = rooms
+        lock.unlock()
+    }
+
+    func dropPending() {
+        lock.lock()
+        pending = HeardChunks()
+        lock.unlock()
+    }
+
+    func drop(room: String) {
+        lock.lock()
+        open[room] = nil
+        lock.unlock()
+    }
+
+    func park(keeping room: String) {
+        lock.lock()
+        if room.isEmpty {
+            open.removeAll(keepingCapacity: false)
+        } else {
+            let kept = open[room]
+            open.removeAll(keepingCapacity: false)
+            if let kept {
+                open[room] = kept
+            }
+        }
+        pending = HeardChunks()
+        lock.unlock()
+    }
+
+    func append(_ data: Data) {
+        guard !data.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        if active.isEmpty {
+            pending.append(data, limit: Self.leadLimit)
+            return
+        }
+        let lead: Data
+        if pending.bytes > 0 {
+            lead = pending.takeData()
+        } else {
+            lead = Data()
+        }
+        for (room, names) in active {
+            var slot = open[room] ?? HeardChunks()
+            if slot.bytes == 0, !lead.isEmpty {
+                slot.append(lead, limit: Self.clipLimit)
+            }
+            for name in names where !name.isEmpty && !slot.names.contains(name) {
+                slot.names.append(name)
+            }
+            slot.append(data, limit: Self.clipLimit)
+            open[room] = slot
+        }
+    }
+
+    func finish(room: String) -> (data: Data, sender: String)? {
+        lock.lock()
+        let slot = open.removeValue(forKey: room)
+        lock.unlock()
+        guard let slot, slot.bytes >= 3_200, !slot.names.isEmpty else { return nil }
+        return (slot.joined(), slot.names.joined(separator: ", "))
+    }
+
+    func finishAll() -> [(room: String, data: Data, sender: String)] {
+        lock.lock()
+        let slots = open
+        open.removeAll(keepingCapacity: false)
+        lock.unlock()
+        var result: [(room: String, data: Data, sender: String)] = []
+        for (room, slot) in slots where slot.bytes >= 3_200 && !slot.names.isEmpty {
+            result.append((room, slot.joined(), slot.names.joined(separator: ", ")))
+        }
+        return result
+    }
+
+    func clear() {
+        lock.lock()
+        pending = HeardChunks()
+        open.removeAll(keepingCapacity: false)
+        active.removeAll(keepingCapacity: false)
+        lock.unlock()
+    }
 }
 
 struct Talker: Equatable, Identifiable {

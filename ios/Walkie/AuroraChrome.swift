@@ -116,11 +116,13 @@ final class WalkieHaptics {
 
 struct AuroraBackground: View {
     var live: Bool
+    /// False while the screen is covered or the app is not in front. The field itself is unchanged.
+    var moving: Bool = true
     @State private var driver = AuroraDriver()
     @State private var pacing = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: (live || pacing) ? 1.0 / 30.0 : 1.0 / 12.0)) { timeline in
+        TimelineView(.animation(minimumInterval: (live || pacing) ? 1.0 / 30.0 : 1.0 / 12.0, paused: !moving)) { timeline in
             AuroraFrame(driver: driver, live: live, time: timeline.date.timeIntervalSinceReferenceDate)
         }
         .ignoresSafeArea()
@@ -468,13 +470,19 @@ final class AudioLevels {
 }
 
 /// Display-rate trace. The Canvas reads the ring itself.
+/// Idle pauses after the existing fade, so a silent button does not redraw every frame.
 struct TalkLevelFill: View {
     var wave: WaveRing
     var transmitting: Bool
     var receiving: Bool
+    var painting: Bool
+    @State private var coasting = false
+    @State private var coastToken = 0
+
+    private var live: Bool { transmitting || receiving }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: nil)) { timeline in
+        TimelineView(.animation(minimumInterval: nil, paused: !painting || (!live && !coasting))) { timeline in
             Canvas { context, size in
                 WaveDraw.draw(
                     context: &context,
@@ -489,6 +497,19 @@ struct TalkLevelFill: View {
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+        .onChange(of: live) { _, talking in
+            coastToken += 1
+            if talking {
+                coasting = true
+                return
+            }
+            let token = coastToken
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(450))
+                guard token == coastToken else { return }
+                coasting = false
+            }
+        }
     }
 }
 
