@@ -343,8 +343,7 @@ struct TalkLevelFill: View {
 
 private enum WaveDraw {
     private static let teal = Color(red: 62.0 / 255.0, green: 230.0 / 255.0, blue: 208.0 / 255.0)
-    private static let stroke = StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
-    private static let glow = StrokeStyle(lineWidth: 3.5, lineCap: .round, lineJoin: .round)
+    private static let stroke = StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
 
     static func draw(
         context: inout GraphicsContext,
@@ -371,8 +370,7 @@ private enum WaveDraw {
             path.move(to: CGPoint(x: 0, y: mid))
             path.addLine(to: CGPoint(x: size.width, y: mid))
         }
-        context.stroke(path, with: .color(teal.opacity(live ? 0.16 : 0.1)), style: glow)
-        context.stroke(path, with: .color(teal.opacity(live ? 1 : 0.45)), style: stroke)
+        context.stroke(path, with: .color(teal), style: stroke)
     }
 
     /// Catmull-Rom through ordinary samples. Steep jumps stay straight so spikes stay sharp.

@@ -161,26 +161,37 @@ struct ContentView: View {
     private var talkScreen: some View {
         GeometryReader { geo in
             let side = min(geo.size.width - 64, max(220, geo.size.height - 240))
-            GlassEffectContainer(spacing: 16) {
-                VStack(spacing: 18) {
-                    TuningReadout(code: talkCode, name: channelName, mode: radioMode, action: openGroups)
-                    JoinBanner(text: session.joinProblem(for: session.talkGroup))
-                    Spacer(minLength: 0)
-                    speakerRow
-                    talkButton(side: side)
-                    CenterStatusLine(text: session.centerStatus, symbol: statusSymbol)
-                    Spacer(minLength: 0)
-                    TalkBottomBar(
-                        speakerOn: session.speakerphone,
-                        onSpeaker: toggleSpeaker,
-                        onDark: enterDarkMode,
-                        onGroups: openGroups,
-                        onDisconnect: disconnectTapped
-                    )
+            ZStack {
+                GlassEffectContainer(spacing: 16) {
+                    VStack(spacing: 18) {
+                        TuningReadout(code: talkCode, name: channelName, mode: radioMode, action: openGroups)
+                        JoinBanner(text: session.joinProblem(for: session.talkGroup))
+                        Spacer(minLength: 0)
+                        speakerRow
+                        talkButton(side: side)
+                        CenterStatusLine(text: session.centerStatus, symbol: statusSymbol)
+                        Spacer(minLength: 0)
+                        TalkBottomBar(
+                            speakerOn: session.speakerphone,
+                            onSpeaker: toggleSpeaker,
+                            onDark: enterDarkMode,
+                            onGroups: openGroups,
+                            onDisconnect: disconnectTapped
+                        )
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .coordinateSpace(name: "talk")
+            .overlayPreferenceValue(WaveAnchorKey.self) { rect in
+                WaveOverlay(
+                    rect: rect,
+                    wave: session.levels.wave,
+                    transmitting: session.isTalking,
+                    receiving: !session.isTalking && !session.talkers.isEmpty
+                )
             }
         }
     }
@@ -335,6 +346,43 @@ private final class TalkActions {
     var end: () -> Void = {}
 }
 
+private struct WaveAnchorKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next.width > 0 {
+            value = next
+        }
+    }
+}
+
+private struct WaveOverlay: View {
+    var rect: CGRect
+    var wave: WaveRing
+    var transmitting: Bool
+    var receiving: Bool
+
+    var body: some View {
+        if rect.width > 1 {
+            ZStack {
+                TalkLevelFill(wave: wave, transmitting: transmitting, receiving: receiving)
+                Text("Talk")
+                    .font(.title2.weight(.semibold))
+                    .lineLimit(1)
+                    .frame(width: rect.width - 48, height: 30)
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.7), radius: 8, y: 1)
+                    .offset(y: rect.height * 0.28)
+            }
+            .frame(width: rect.width, height: rect.height)
+            .position(x: rect.midX, y: rect.midY)
+            .allowsHitTesting(false)
+            .transaction { $0.disablesAnimations = true }
+        }
+    }
+}
+
 private struct TalkButton: View {
     @ObservedObject var session: WalkieSession
     var side: CGFloat
@@ -343,16 +391,9 @@ private struct TalkButton: View {
     var body: some View {
         TalkPressTarget(side: side, enabled: session.canTransmit, actions: actions)
             .equatable()
-            .overlay(
-                TalkButtonFace(
-                    side: side,
-                    levels: session.levels,
-                    transmitting: session.isTalking,
-                    receiving: !session.isTalking && !session.talkers.isEmpty
-                )
-                .allowsHitTesting(false)
-            )
+            .overlay(TalkButtonFace(side: side).allowsHitTesting(false))
             .opacity(session.canTransmit ? 1 : 0.45)
+            .background(waveAnchor)
             .onAppear(perform: bindActions)
             .accessibilityElement(children: .ignore)
             .accessibilityAddTraits(.isButton)
@@ -365,6 +406,12 @@ private struct TalkButton: View {
                     session.beginTransmitting()
                 }
             }
+    }
+
+    private var waveAnchor: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(key: WaveAnchorKey.self, value: proxy.frame(in: .named("talk")))
+        }
     }
 
     private func bindActions() {
@@ -398,9 +445,6 @@ private struct TalkPressTarget: View, Equatable {
 
 private struct TalkButtonFace: View {
     var side: CGFloat
-    var levels: AudioLevels
-    var transmitting: Bool
-    var receiving: Bool
 
     var body: some View {
         ZStack {
@@ -411,15 +455,6 @@ private struct TalkButtonFace: View {
             Image(systemName: "mic.fill")
                 .font(.system(size: 52, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.2))
-            TalkLevelFill(wave: levels.wave, transmitting: transmitting, receiving: receiving)
-                .clipShape(Circle())
-            Text("Talk")
-                .font(.title2.weight(.semibold))
-                .lineLimit(1)
-                .frame(width: side - 48, height: 30)
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.7), radius: 8, y: 1)
-                .offset(y: side * 0.28)
         }
         .frame(width: side, height: side)
         .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 1))
