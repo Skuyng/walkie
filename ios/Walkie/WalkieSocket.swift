@@ -93,7 +93,7 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
     }
 
     func sendSetPassword(room: String, password: String) {
-        sendEncodable(Command(t: "setPassword", room: room, password: password))
+        sendEncodable(Command(t: "setPassword", password: password, room: room))
     }
 
     func sendInvite(room: String, username: String) {
