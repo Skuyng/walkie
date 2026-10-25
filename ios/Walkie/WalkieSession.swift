@@ -125,6 +125,8 @@ final class WalkieSession: ObservableObject {
     private var keepAccount = false
     private var socketOpen = false
     private var socketReady = false
+    /// Bumps when talk ends so a late ready chirp does not open the mic.
+    private var readyGeneration = 0
     private var preferTalk: String?
 
     private enum PendingAuth {
@@ -1094,7 +1096,22 @@ extension WalkieSession: ChannelSignaling {
     }
 
     func setMicrophoneOpen(_ open: Bool) {
-        engine.setMicrophoneOpen(open)
+        if !open {
+            readyGeneration += 1
+            engine.setMicrophoneOpen(false)
+            return
+        }
+        guard audioReady, socketReady, socketOpen else {
+            engine.setMicrophoneOpen(true)
+            return
+        }
+        readyGeneration += 1
+        let generation = readyGeneration
+        engine.playReadyChirp { [weak self] in
+            guard let self else { return }
+            guard self.isTalking, self.readyGeneration == generation else { return }
+            self.engine.setMicrophoneOpen(true)
+        }
     }
 }
 

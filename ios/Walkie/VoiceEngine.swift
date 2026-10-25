@@ -67,6 +67,8 @@ final class VoiceEngine {
     private var primeTimer: DispatchWorkItem?
     private var jitterTimerArmed = false
     private var lastAudioAt = Date.distantPast
+    /// True while the local ready chirp owns the beep player.
+    private var chirpPlaying = false
 
     private static let jitterSeconds = 0.14
     private static let jitterHold: TimeInterval = 0.15
@@ -213,6 +215,36 @@ final class VoiceEngine {
     func playTalkBoundaryBeep(isStart: Bool) {
         queue.async { [weak self] in
             self?.playBeepOnQueue(frequency: isStart ? 988 : 494)
+        }
+    }
+
+    /// Local “you can speak” chirp. `then` runs on the main queue after it has
+    /// played, or immediately when the engine is not up. The mic gate stays
+    /// closed for the caller so the tone is not encoded.
+    func playReadyChirp(then: @escaping () -> Void) {
+        queue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async(execute: then)
+                return
+            }
+            guard self.shouldRun, let player = self.beepPlayer else {
+                DispatchQueue.main.async(execute: then)
+                return
+            }
+            let output = player.outputFormat(forBus: 0)
+            let format = output.sampleRate > 0 ? output : self.playbackFormat
+            guard let format, let buffer = self.makeChirp(format: format) else {
+                DispatchQueue.main.async(execute: then)
+                return
+            }
+            self.chirpPlaying = true
+            player.scheduleBuffer(buffer, at: nil, options: [], completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                self?.queue.async {
+                    self?.chirpPlaying = false
+                    DispatchQueue.main.async(execute: then)
+                }
+            }
+            if !player.isPlaying { player.play() }
         }
     }
 
@@ -486,6 +518,7 @@ final class VoiceEngine {
         burstStarted = false
         jitterTimerArmed = false
         lastAudioAt = .distantPast
+        chirpPlaying = false
     }
 
     private func handleInput(_ buffer: AVAudioPCMBuffer) {
@@ -615,8 +648,51 @@ final class VoiceEngine {
         let output = player.outputFormat(forBus: 0)
         let format = output.sampleRate > 0 ? output : playbackFormat
         guard let format, let buffer = makeBeep(frequency: frequency, format: format) else { return }
-        player.scheduleBuffer(buffer, at: nil, options: [.interrupts])
+        let options: AVAudioPlayerNodeBufferOptions = chirpPlaying ? [] : [.interrupts]
+        player.scheduleBuffer(buffer, at: nil, options: options)
         if !player.isPlaying { player.play() }
+    }
+
+    /// Two short rising tones, about 110 ms, at a moderate level.
+    private func makeChirp(format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let sampleRate = format.sampleRate
+        guard sampleRate > 0 else { return nil }
+        let first = 0.050
+        let gap = 0.010
+        let second = 0.052
+        let frames = AVAudioFrameCount(sampleRate * (first + gap + second))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
+              let channels = buffer.floatChannelData else { return nil }
+        buffer.frameLength = frames
+        let channelCount = Int(format.channelCount)
+        let firstFrames = Int(sampleRate * first)
+        let secondStart = Int(sampleRate * (first + gap))
+        for index in 0..<Int(frames) {
+            var amplitude = 0.0
+            if index < firstFrames {
+                amplitude = tone(index: index, count: firstFrames, frequency: 784, sampleRate: sampleRate)
+            } else if index >= secondStart {
+                let local = index - secondStart
+                let count = Int(frames) - secondStart
+                amplitude = tone(index: local, count: count, frequency: 1175, sampleRate: sampleRate)
+            }
+            let sample = Float(amplitude)
+            for channel in 0..<channelCount {
+                channels[channel][index] = sample
+            }
+        }
+        return buffer
+    }
+
+    private func tone(index: Int, count: Int, frequency: Double, sampleRate: Double) -> Double {
+        guard count > 1 else { return 0 }
+        let time = Double(index) / sampleRate
+        var amplitude = 0.22 * sin(2 * Double.pi * frequency * time)
+        let fade = max(1, min(count / 4, Int(sampleRate * 0.004)))
+        if index < fade { amplitude *= Double(index) / Double(fade) }
+        let remaining = count - index
+        if remaining < fade { amplitude *= Double(remaining) / Double(fade) }
+        return amplitude
     }
 
     private func makeBeep(frequency: Double, format: AVAudioFormat) -> AVAudioPCMBuffer? {
