@@ -17,7 +17,8 @@ enum ServerEvent {
 /// WebSocket client for the protocol in `server.js`.
 ///
 /// Sign in with `{t:signup}`, `{t:login}`, or `{t:resume}`. Membership, not a
-/// group password, decides who hears audio. `{t:start}` and `{t:stop}` include
+/// group password, decides who may hear a channel. Audio is only for the
+/// channel that socket is joined to. `{t:start}` and `{t:stop}` include
 /// the talk room. Binary frames stay raw PCM16.
 final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
     var onOpen: (() -> Void)?

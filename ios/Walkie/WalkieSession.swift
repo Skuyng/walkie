@@ -67,10 +67,15 @@ final class WalkieSession: ObservableObject {
         linkState == .connected && audioReady
     }
 
+    /// Someone is talking on the channel this phone is joined to.
+    var hearingThisChannel: Bool {
+        talkers.contains { $0.room == talkGroup }
+    }
+
     var speakerLine: String {
         var namesByRoom: [String: [String]] = [:]
         var order: [String] = []
-        for talker in talkers {
+        for talker in talkers where talker.room == talkGroup {
             if namesByRoom[talker.room] == nil {
                 order.append(talker.room)
                 namesByRoom[talker.room] = []
@@ -200,6 +205,7 @@ final class WalkieSession: ObservableObject {
         quietFromMinutes = Self.clampMinutes(defaults.object(forKey: Key.quietFrom) as? Int ?? (22 * 60))
         quietToMinutes = Self.clampMinutes(defaults.object(forKey: Key.quietTo) as? Int ?? (7 * 60))
         engine.setListenGain(Float(listenGain))
+        engine.setInboundChannel(talkGroup)
         engine.setSpeakerphone(listenOutput != .earpiece)
         engine.setIncomingMuted(Self.quietHoursCover(enabled: quietHoursEnabled, from: quietFromMinutes, to: quietToMinutes, at: Date()) || listenOutput == .mute)
         engine.attachLevelMeter(levels.wave)
@@ -220,6 +226,7 @@ final class WalkieSession: ObservableObject {
         }
         socket.onAudio = { [weak self] data in
             guard let self else { return }
+            guard self.engine.acceptsInboundAudio() else { return }
             self.engine.playIncoming(data)
             let captured = data
             Task { @MainActor [weak self] in
@@ -377,6 +384,7 @@ final class WalkieSession: ObservableObject {
         talkGroup = ""
         room = ""
         preferTalk = nil
+        engine.setInboundChannel("")
         clearHeard()
         saveGroups()
         if socketOpen {
@@ -551,7 +559,9 @@ final class WalkieSession: ObservableObject {
 
     func selectTalk(_ id: String) {
         guard groups.contains(where: { $0.id == id }) else { return }
+        let switched = talkGroup != id
         talkGroup = id
+        if switched { parkInboundChannel() }
         syncRoomName()
         saveGroups()
         pushSubscribe()
@@ -631,6 +641,7 @@ final class WalkieSession: ObservableObject {
         if talkGroup == id {
             if isTalking { endTransmitting() }
             talkGroup = groups.first?.id ?? ""
+            parkInboundChannel()
             syncRoomName()
         }
         saveGroups()
@@ -973,6 +984,7 @@ final class WalkieSession: ObservableObject {
         finishAllHeardClips()
         let somebodyTalking = !talkers.isEmpty
         talkers.removeAll()
+        engine.resetInboundTalk()
         membersByRoom = [:]
         selfID = ""
         if somebodyTalking, !isQuietHours() {
@@ -1073,9 +1085,22 @@ final class WalkieSession: ObservableObject {
                 removeTalker(id: talker.id, room: talker.room)
             }
         case .talkStarted(let name, let room, let id):
-            addTalker(id: id, name: name, room: room.isEmpty ? talkGroup : room)
+            let channel = room.isEmpty ? talkGroup : room
+            guard channel == talkGroup else {
+                engine.noteInboundTalk(room: channel, started: true)
+                pendingHeard.removeAll(keepingCapacity: true)
+                return
+            }
+            engine.noteInboundTalk(room: channel, started: true)
+            addTalker(id: id, name: name, room: channel)
         case .talkStopped(let name, let room, let id):
-            removeTalker(id: id.isEmpty ? name : id, room: room.isEmpty ? talkGroup : room)
+            let channel = room.isEmpty ? talkGroup : room
+            guard channel == talkGroup else {
+                engine.noteInboundTalk(room: channel, started: false)
+                return
+            }
+            engine.noteInboundTalk(room: channel, started: false)
+            removeTalker(id: id.isEmpty ? name : id, room: channel)
         case .rejected(let room, let message):
             let text = message.isEmpty ? "Noe gikk galt" : message
             if !signedIn {
@@ -1343,6 +1368,7 @@ final class WalkieSession: ObservableObject {
 
     private func applyInbox(_ serverGroups: [ServerGroup], invites nextInvites: [WalkieInvite], requests nextRequests: [WalkieRequest]) {
         let previous = groups
+        let previousTalk = talkGroup
         var next: [WalkieGroup] = []
         for item in serverGroups {
             let listen = previous.first { $0.id == item.id }?.listen ?? true
@@ -1373,6 +1399,9 @@ final class WalkieSession: ObservableObject {
             talkGroup = next.first?.id ?? ""
         }
         syncRoomName()
+        if talkGroup != previousTalk {
+            parkInboundChannel()
+        }
         saveGroups()
         if signedIn && socketReady {
             pushSubscribe()
@@ -1380,10 +1409,24 @@ final class WalkieSession: ObservableObject {
         connectIfNeeded()
     }
 
+    /// Drop speaker pulse, haptics, and replay for every channel except the one
+    /// this phone just joined. Does not rebuild the audio graph.
+    private func parkInboundChannel() {
+        engine.setInboundChannel(talkGroup)
+        let keep = talkGroup
+        talkers.removeAll { $0.room != keep }
+        openHeard = openHeard.filter { $0.key == keep }
+        pendingHeard.removeAll(keepingCapacity: true)
+        if talkers.isEmpty {
+            engine.markTalkBurstEnded()
+        }
+    }
+
     /// Last saved channel, or the first group or direct chat still on the account.
     private func resolveTalkChannel() {
         if groups.contains(where: { $0.id == talkGroup }) { return }
         talkGroup = groups.first?.id ?? ""
+        parkInboundChannel()
         syncRoomName()
         if !talkGroup.isEmpty {
             saveGroups()

@@ -119,12 +119,16 @@ const srv = http.createServer((q, r) => {
 
 const wss = new WebSocketServer({ server: srv });
 
-function listening(client, room) {
-  return !!(client.rooms && client.rooms.has(room));
-}
-
 function authed(client, room) {
   return !!(client.auth && client.auth.has(room));
+}
+
+// Audio and talk start/stop follow the channel this socket is on (`talk`),
+// not every membership. A second device of the same user keeps its own `talk`.
+function tuned(client, room) {
+  if (!room || client.talk !== room || !authed(client, room)) return false;
+  if (client.muted && client.muted.has(room)) return false;
+  return true;
 }
 
 function isDirectRoom(room) {
@@ -134,15 +138,35 @@ function isDirectRoom(room) {
 function bc(room, data, except, bin) {
   for (const client of wss.clients) {
     if (client === except || client.readyState !== 1) continue;
+    if (!tuned(client, room)) continue;
     if (bin) {
-      if (!listening(client, room) || !authed(client, room)) continue;
       if (except && except.user && client.blocked && client.blocked.has(except.user.id)) continue;
       if (isDirectRoom(room) && except && except.user && client.user && except.blocked && except.blocked.has(client.user.id)) continue;
-    } else if (!authed(client, room)) {
-      continue;
     }
     client.send(data, { binary: bin });
   }
+}
+
+function releaseTalk(ws) {
+  if (!ws || !ws.talkingSince) return;
+  const room = ws.talk;
+  const name = ws.name;
+  const id = ws.peerId;
+  endTalk(ws);
+  if (room && name) {
+    bc(room, JSON.stringify({ t: 'stop', name, room, id: id || '' }), ws, false);
+  }
+}
+
+function setTalk(ws, room) {
+  const next = room || '';
+  if ((ws.talk || '') === next) {
+    ws.room = next;
+    return;
+  }
+  releaseTalk(ws);
+  ws.talk = next;
+  ws.room = next;
 }
 
 function memberList(room) {
@@ -202,8 +226,7 @@ function dropRoom(client, room) {
   client.rooms.delete(room);
   client.muted.delete(room);
   if (client.talk === room) {
-    client.talk = firstRoom(client.rooms) || firstRoom(client.auth);
-    client.room = client.talk || '';
+    setTalk(client, firstRoom(client.rooms) || firstRoom(client.auth));
   }
 }
 
@@ -212,8 +235,8 @@ function applyMembership(ws, groups) {
   const allowed = new Set(groups.map((group) => group.id));
   ws.auth = allowed;
   ws.rooms = new Set([...allowed].filter((id) => !ws.muted.has(id)));
-  if (!allowed.has(ws.talk)) ws.talk = firstRoom(ws.rooms) || firstRoom(allowed);
-  ws.room = ws.talk || '';
+  if (!allowed.has(ws.talk)) setTalk(ws, firstRoom(ws.rooms) || firstRoom(allowed));
+  else ws.room = ws.talk || '';
   return allowed;
 }
 
@@ -399,6 +422,7 @@ async function deleteAccount(ws) {
 }
 
 async function logout(ws) {
+  releaseTalk(ws);
   if (ws.token) await store.deleteSession(ws.token);
   const previous = new Set([...(ws.auth || []), ...(ws.rooms || [])]);
   ws.user = null;
@@ -600,7 +624,7 @@ async function subscribe(ws, message) {
   const previous = new Set([...(ws.auth || []), ...(ws.rooms || [])]);
   applyMembership(ws, groups);
   const talk = normRoom(message.talk);
-  if (talk && ws.auth.has(talk)) ws.talk = talk;
+  if (talk && ws.auth.has(talk)) setTalk(ws, talk);
   else if (talk) sendError(ws, talk, 'Ikke medlem');
   ws.room = ws.talk || '';
   ws.rooms = new Set([...ws.auth].filter((id) => !ws.muted.has(id)));
@@ -643,15 +667,14 @@ wss.on('connection', (ws) => {
     });
   });
   ws.on('close', () => {
-    endTalk(ws);
-    const name = ws.name;
     const rooms = new Set([...(ws.auth || []), ...(ws.rooms || [])]);
+    if (ws.talk) rooms.add(ws.talk);
+    releaseTalk(ws);
     ws.auth = new Set();
     ws.rooms = new Set();
-    for (const room of rooms) {
-      if (name) bc(room, JSON.stringify({ t: 'stop', name, room, id: ws.peerId }), null, false);
-      sendUsers(room);
-    }
+    ws.talk = '';
+    ws.room = '';
+    for (const room of rooms) sendUsers(room);
   });
 });
 
@@ -683,8 +706,7 @@ async function handleMessage(ws, message) {
     if (!requireUser(ws)) return;
     const room = normRoom(message.room);
     if (room && ws.auth && ws.auth.has(room)) {
-      ws.talk = room;
-      ws.room = room;
+      setTalk(ws, room);
     } else if (room) {
       sendError(ws, room, 'Ikke medlem');
     }

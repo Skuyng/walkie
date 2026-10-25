@@ -145,7 +145,7 @@ struct ContentView: View {
                     rect: rect,
                     wave: session.levels.wave,
                     transmitting: session.isTalking,
-                    receiving: !session.isTalking && !session.talkers.isEmpty
+                    receiving: !session.isTalking && session.hearingThisChannel
                 )
             }
             .overlay(alignment: .bottom) {
@@ -358,7 +358,7 @@ struct ContentView: View {
     }
 
     private var auroraLive: Bool {
-        session.isTalking || !session.talkers.isEmpty
+        session.isTalking || session.hearingThisChannel
     }
 
     private var talkCode: String {
@@ -374,7 +374,7 @@ struct ContentView: View {
 
     private var radioMode: String {
         if session.isTalking { return "TX" }
-        if !session.talkers.isEmpty { return "RX" }
+        if session.hearingThisChannel { return "RX" }
         return ""
     }
 

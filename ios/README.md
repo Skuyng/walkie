@@ -44,8 +44,8 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Lagre passord / Fjern passord** — admin bytter eller fjerner gruppepassordet.
 - **Invitér** — admin skriver et brukernavn. Invitasjonen vises hos den andre under Invitasjoner, med Godta og Avslå.
 - **Fjern** — admin ser knappen ved andre medlemmer og må bekrefte. Den som blir fjernet får beskjed og hører ikke gruppen lenger. Admin kan ikke fjerne seg selv. Admin sletter gruppen. Medlemmer forlater den.
-- **Lytt** — på per gruppe. Du kan lytte til flere samtidig. Av gjør at du fortsatt ser hvem som er pålogget, men ikke hører lyden.
-- **Talk / Velg** — én gruppe om gangen. Hold-for-å-snakke og volum opp sender bare dit. Pillen øverst åpner en glassliste under seg, med Grupper og Direkte. Trykk en rad for å bytte kanal, så kobles den til med en gang. Siste kanal lagres. Finnes den ikke lenger, brukes den første gruppen eller direktesamtalen. Trykk utenfor for å lukke. Tannhjulet åpner fortsatt Innstillinger.
+- **Lytt** — på per gruppe. Av på kanalen du står i gjør at du fortsatt ser hvem som er pålogget, men ikke hører lyden.
+- **Talk / Velg** — én kanal om gangen. Du hører bare den du står i, også når noen snakker i en direkte samtale med deg. Hold-for-å-snakke og volum opp sender bare dit. Pillen øverst åpner en glassliste under seg, med Grupper og Direkte. Trykk en rad for å bytte kanal, så kobles den til med en gang. Siste kanal lagres. Finnes den ikke lenger, brukes den første gruppen eller direktesamtalen. Trykk utenfor for å lukke. Tannhjulet åpner fortsatt Innstillinger.
 - **Pålogget** — grønn prikk ved navnet. Den som snakker utheves.
 - **Server** — `wss://walkie-bc0z.onrender.com` som standard. `https://` gjøres om til `wss://`, og `http://` til `ws://`. Tomt felt bruker standardadressen.
 - **Hold for å snakke** — lyd sendes bare mens knappen holdes inne.
@@ -77,7 +77,7 @@ Tekst (JSON):
 - fra serveren: `{"t":"start","name":"…","room":"…","id":"…"}` og `{"t":"stop","name":"…","room":"…","id":"…"}`
 - fra serveren: `{"t":"error","room":"…","error":"Ikke medlem"}` når du ikke er medlem
 
-Lyd sendes aldri til en socket som ikke er medlem, og bare til dem som lytter. En blokkert avsender høres ikke hos den som blokkerte. Gruppepassord brukes ikke lenger som eneste adgang. Et valgfritt passord kan brukes i tillegg til medlemskap.
+Lyd og start/stopp sendes bare til sockets som står i akkurat den kanalen, og som ikke har dempet den. En direkte samtale går ikke til brukerens andre telefoner eller til gruppen de står i. En blokkert avsender høres ikke hos den som blokkerte. Gruppepassord brukes ikke lenger som eneste adgang. Et valgfritt passord kan brukes i tillegg til medlemskap.
 
 Lyd er binære websocket-rammer uten filheader: **PCM, 16-bit med fortegn, little-endian, mono, 16 000 Hz**. Nettleseren legger `sample * 32767` i en `Int16Array` og spiller av med `/ 32768`. iPhone gjør det samme, så appen og nettsiden kan være i samme gruppe. Meldingsraten er fortsatt 16 kHz, slik at eldre klienter kan dekode lyden.
 

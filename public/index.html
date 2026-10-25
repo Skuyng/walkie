@@ -57,6 +57,7 @@ let requests=[];
 let blocked=[];
 let directs=[];
 let talk=localStorage.talk||'';
+let homeTalk=0, foreignTalk=0;
 let listenMap=loadListen();
 let members={};
 let speakers={};
@@ -156,7 +157,7 @@ function onTool(e){
   const act=e.currentTarget.getAttribute('data-act');
   const user=e.currentTarget.getAttribute('data-user')||'';
   const group=groups.find(g=>g.id===id);
-  if(act==='talk'&&group){talk=id;sendSubscribe()}
+  if(act==='talk'&&group){tune(id);sendSubscribe()}
   if(act==='listen'&&group){group.listen=e.currentTarget.checked;sendSubscribe()}
   if(act==='drop'&&group){send(group.admin?{t:'deleteGroup',room:id}:{t:'leave',room:id})}
   if(act==='invite'){
@@ -193,14 +194,21 @@ function applyInbox(message){
   requests=message.requests||[];
   blocked=message.blocked||[];
   directs=message.directs||[];
-  if(prefer&&groups.some(g=>g.id===prefer))talk=prefer;
+  if(prefer&&groups.some(g=>g.id===prefer))tune(prefer);
   prefer='';
-  if(!groups.some(g=>g.id===talk))talk=groups[0]?groups[0].id:'';
+  if(!groups.some(g=>g.id===talk))tune(groups[0]?groups[0].id:'');
   render();
   sendSubscribe();
 }
+function tune(next){
+  if(next!==talk){homeTalk=0;foreignTalk=0;speakers={};}
+  talk=next||'';
+}
 function onMessage(e){
-  if(typeof e.data!=='string')return play(e.data);
+  if(typeof e.data!=='string'){
+    if(foreignTalk>0&&homeTalk===0)return;
+    return play(e.data);
+  }
   const m=JSON.parse(e.data);
   if(m.t==='session'){
     tok=m.token||tok;
@@ -260,6 +268,10 @@ function onMessage(e){
   }
   if(m.t==='start'||m.t==='stop'){
     const room=m.room||talk;
+    const home=!room||room===talk;
+    if(m.t==='start'){if(home)homeTalk++;else foreignTalk++;}
+    else {if(home)homeTalk=Math.max(0,homeTalk-1);else foreignTalk=Math.max(0,foreignTalk-1);}
+    if(!home)return;
     const id=m.id||m.name;
     speakers[room]=speakers[room]||{};
     if(m.t==='start')speakers[room][id]=m.name;else delete speakers[room][id];
@@ -267,14 +279,9 @@ function onMessage(e){
   }
 }
 function whoText(){
-  const lines=[];
-  Object.keys(speakers).forEach(room=>{
-    const names=Object.keys(speakers[room]||{}).map(id=>speakers[room][id]);
-    if(!names.length)return;
-    const label=(groups.find(g=>g.id===room)||{name:room}).name;
-    lines.push(names.join(', ')+' i '+label);
-  });
-  $('who').textContent=lines.length?lines.join(' · ')+' snakker':'';
+  const names=Object.keys(speakers[talk]||{}).map(id=>speakers[talk][id]);
+  const label=(groups.find(g=>g.id===talk)||{name:talk||''}).name;
+  $('who').textContent=names.length?names.join(', ')+' i '+label+' snakker':'';
 }
 function connectSocket(){
   if(ws&&(ws.readyState===0||ws.readyState===1))return;

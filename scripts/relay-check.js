@@ -373,12 +373,91 @@ async function startServer() {
     } catch { return false; }
   }, 4000, askCara));
   if (!caraDirect.groups.some((group) => group.id === dm.id && group.peer === 'ada')) throw new Error('direct channel missing for cara');
+  const caraSub = cara.inbox.length;
+  send(cara, { t: 'subscribe', talk: dm.id, muted: [] });
+  await waitFor(cara.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'users' && message.room === dm.id;
+    } catch { return false; }
+  }, 4000, caraSub);
+  const adaOff = ada.inbox.length;
+  const bobOff = bob.inbox.length;
+  send(cara, { t: 'start', room: dm.id });
+  cara.ws.send(frame);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const heardForeign = (client, from) => client.inbox.slice(from).some((entry) => {
+    if (entry.bin) return true;
+    try {
+      const message = JSON.parse(entry.text);
+      return (message.t === 'start' || message.t === 'stop') && message.room === dm.id;
+    } catch { return false; }
+  });
+  if (heardForeign(ada, adaOff)) throw new Error('group-tuned member heard a direct channel');
+  if (heardForeign(bob, bobOff)) throw new Error('unrelated member heard a direct channel');
+  send(cara, { t: 'stop', room: dm.id });
+
+  const adaEar = await connect(server.url);
+  send(adaEar, { t: 'login', username: 'ada', password: 'secret1' });
+  await waitFor(adaEar.inbox, (entry) => !entry.bin && entry.text.includes('"session"'));
+  await waitFor(adaEar.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.id === dm.id);
+    } catch { return false; }
+  });
+  const earSub = adaEar.inbox.length;
+  send(adaEar, { t: 'subscribe', talk: dm.id, muted: [] });
+  await waitFor(adaEar.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'users' && message.room === dm.id;
+    } catch { return false; }
+  }, 4000, earSub);
+  const earAt = adaEar.inbox.length;
+  const stillGroup = ada.inbox.length;
+  send(cara, { t: 'start', room: dm.id });
+  cara.ws.send(frame);
+  const earAudio = await waitFor(adaEar.inbox, (entry) => entry.bin, 3000, earAt);
+  if (!earAudio.data.equals(frame)) throw new Error('direct-tuned socket missed audio');
+  const earStart = adaEar.inbox.slice(earAt).some((entry) => !entry.bin && entry.text.includes('"start"') && entry.text.includes(dm.id));
+  if (!earStart) throw new Error('direct-tuned socket missed talk start');
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (heardForeign(ada, stillGroup)) throw new Error('other socket of the same user heard the direct channel');
+  send(cara, { t: 'stop', room: dm.id });
+  adaEar.ws.close();
+
+  const adaSub = ada.inbox.length;
   send(ada, { t: 'subscribe', talk: dm.id, muted: [] });
   send(cara, { t: 'subscribe', talk: dm.id, muted: [] });
+  await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'users' && message.room === dm.id;
+    } catch { return false; }
+  }, 4000, adaSub);
+  const leftGroup = ada.inbox.length;
+  bob.ws.send(frame);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (ada.inbox.slice(leftGroup).some((entry) => entry.bin)) throw new Error('socket still received the channel it left');
   const dmHear = cara.inbox.length;
   ada.ws.send(frame);
   const dmAudio = await waitFor(cara.inbox, (entry) => entry.bin, 3000, dmHear);
   if (!dmAudio.data.equals(frame)) throw new Error('direct audio missed');
+  const muteSub = cara.inbox.length;
+  send(cara, { t: 'subscribe', talk: dm.id, muted: [dm.id] });
+  await waitFor(cara.inbox, (entry) => !entry.bin && entry.text.includes('"users"'), 4000, muteSub);
+  const mutedDm = cara.inbox.length;
+  ada.ws.send(frame);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (cara.inbox.slice(mutedDm).some((entry) => entry.bin)) throw new Error('muted direct channel still played');
+  const unmuteSub = cara.inbox.length;
+  send(cara, { t: 'subscribe', talk: dm.id, muted: [] });
+  await waitFor(cara.inbox, (entry) => !entry.bin && entry.text.includes('"users"'), 4000, unmuteSub);
   const blockDm = ada.inbox.length;
   send(ada, { t: 'block', username: 'cara' });
   await waitFor(ada.inbox, (entry) => {

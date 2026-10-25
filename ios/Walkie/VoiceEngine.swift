@@ -98,6 +98,10 @@ final class VoiceEngine {
     private var releaseTail: DispatchWorkItem?
     private var releaseGeneration = 0
     private let incomingMuted = OSAllocatedUnfairLock(initialState: false)
+    /// Which channel this phone is on, plus open talk-start counts.
+    /// Binary frames have no channel id, so a foreign start is the only
+    /// client-side reason to drop PCM, and only while this channel is quiet.
+    private let inboundRoute = OSAllocatedUnfairLock(initialState: InboundRoute())
     /// Automatic leveler. Separate from the listener's volume slider.
     private var playbackGain: Float = 1
     private let listenGain = OSAllocatedUnfairLock(initialState: Float(1))
@@ -108,6 +112,13 @@ final class VoiceEngine {
     private static let jitterHold: TimeInterval = 0.15
     /// Frames still sent after the finger lifts, so the last word is not cut.
     private static let releaseTailSeconds: TimeInterval = 0.20
+
+    private struct InboundRoute: Sendable {
+        var channel = ""
+        var foreignOpen = 0
+        var homeOpen = 0
+        var accepts: Bool { foreignOpen == 0 || homeOpen > 0 }
+    }
 
     private static let wireFormat: AVAudioFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -349,7 +360,44 @@ final class VoiceEngine {
 
     func playIncoming(_ data: Data) {
         queue.async { [weak self] in
-            self?.playIncomingOnQueue(data)
+            guard let self else { return }
+            guard self.inboundRoute.withLock({ $0.accepts }) else { return }
+            self.playIncomingOnQueue(data)
+        }
+    }
+
+    /// Current channel. Counts reset only when the channel actually changes,
+    /// so an inbox refresh does not reopen a foreign transmission.
+    func setInboundChannel(_ channel: String) {
+        inboundRoute.withLock { state in
+            guard state.channel != channel else { return }
+            state.channel = channel
+            state.foreignOpen = 0
+            state.homeOpen = 0
+        }
+    }
+
+    /// `started` is a talk-start. A room other than the current channel
+    /// does not open the speaker.
+    func noteInboundTalk(room: String, started: Bool) {
+        inboundRoute.withLock { state in
+            let foreign = !room.isEmpty && room != state.channel
+            if foreign {
+                state.foreignOpen = max(0, state.foreignOpen + (started ? 1 : -1))
+            } else {
+                state.homeOpen = max(0, state.homeOpen + (started ? 1 : -1))
+            }
+        }
+    }
+
+    func acceptsInboundAudio() -> Bool {
+        inboundRoute.withLock { $0.accepts }
+    }
+
+    func resetInboundTalk() {
+        inboundRoute.withLock { state in
+            state.foreignOpen = 0
+            state.homeOpen = 0
         }
     }
 
