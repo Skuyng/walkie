@@ -39,17 +39,19 @@ struct ContentView: View {
             session.haptics.prepare()
             session.prepareVolumeHUD()
             refreshVolumeButtons()
+            syncProximity(scenePhase)
         }
         .onDisappear {
             exitDarkMode()
+            UIDevice.current.isProximityMonitoringEnabled = false
             session.setVolumeButtonMonitoringEnabled(false)
             session.setHeadsetTalkEnabled(false)
         }
         .onChange(of: session.name) { _, _ in session.savePreferences() }
         .onChange(of: session.room) { _, _ in session.savePreferences() }
         .onChange(of: session.serverURL) { _, _ in session.savePreferences() }
-        .onChange(of: session.listenGain) { _, _ in
-            if showListenVolume { scheduleListenHide(volume: true) }
+        .onChange(of: session.listenOutput) { _, _ in
+            syncProximity(scenePhase)
         }
         .onChange(of: session.linkState) { _, _ in refreshVolumeButtons() }
         .onChange(of: session.hasConnectedOnce) { _, connected in
@@ -69,6 +71,10 @@ struct ContentView: View {
                 session.resumeAudioIfNeeded()
             }
             syncDarkMode(with: phase)
+            syncProximity(phase)
+            refreshVolumeButtons()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIDevice.proximityStateDidChangeNotification)) { _ in
             refreshVolumeButtons()
         }
         .sheet(isPresented: $showMenu) {
@@ -106,8 +112,11 @@ struct ContentView: View {
                         TalkBottomBar(
                             session: session,
                             link: linkAction,
+                            showVolume: showListenVolume,
                             onSpeaker: cycleListen,
                             onSpeakerHold: revealListenVolume,
+                            onVolumeChanged: holdListenVolume,
+                            onVolumeEnded: releaseListenVolume,
                             onDark: enterDarkMode,
                             onLink: linkTapped
                         )
@@ -184,9 +193,6 @@ struct ContentView: View {
 
     private var listenChrome: some View {
         VStack(spacing: 8) {
-            if showListenVolume {
-                ListenVolumeBar(session: session)
-            }
             if showListenToast && !listenToast.isEmpty {
                 Text(listenToast)
                     .font(.subheadline.weight(.semibold))
@@ -212,10 +218,26 @@ struct ContentView: View {
         scheduleListenHide(volume: true)
     }
 
+    private func holdListenVolume() {
+        listenHide?.cancel()
+    }
+
+    private func releaseListenVolume() {
+        scheduleListenHide(volume: true)
+    }
+
+    /// Earpiece blanks the screen at the ear. Speaker, mute, and a real
+    /// background transition turn the sensor off. A proximity blank is not
+    /// backgrounding: volume-up hold-to-talk stays armed.
+    private func syncProximity(_ phase: ScenePhase) {
+        let atEar = session.listenOutput == .earpiece && phase != .background
+        UIDevice.current.isProximityMonitoringEnabled = atEar
+    }
+
     private func scheduleListenHide(volume: Bool) {
         listenHide?.cancel()
         listenHide = Task {
-            try? await Task.sleep(for: .seconds(volume ? 2.4 : 1.3))
+            try? await Task.sleep(for: .seconds(volume ? 1.6 : 1.3))
             guard !Task.isCancelled else { return }
             if volume {
                 showListenVolume = false
@@ -326,12 +348,20 @@ struct ContentView: View {
     }
 
     private func refreshVolumeButtons() {
-        if scenePhase == .active {
+        if scenePhase == .active || volumeHoldArmed {
             session.prepareVolumeHUD()
         }
-        let listen = scenePhase == .active && session.linkState == .connected
-        session.setVolumeButtonMonitoringEnabled(listen)
+        session.setVolumeButtonMonitoringEnabled(volumeHoldArmed)
         session.setHeadsetTalkEnabled(session.linkState == .connected)
+    }
+
+    /// Volume-up listens in the foreground, and also while earpiece mode has
+    /// only turned the screen off. The app switcher and background do not.
+    private var volumeHoldArmed: Bool {
+        guard session.linkState == .connected else { return false }
+        if scenePhase == .active { return true }
+        if scenePhase == .background { return false }
+        return session.listenOutput == .earpiece && UIDevice.current.proximityState
     }
 
     private var errorPresented: Binding<Bool> {
@@ -668,8 +698,11 @@ private struct PresenceFace: View {
 private struct TalkBottomBar: View {
     @ObservedObject var session: WalkieSession
     var link: HomeLink
+    var showVolume: Bool
     var onSpeaker: () -> Void
     var onSpeakerHold: () -> Void
+    var onVolumeChanged: () -> Void
+    var onVolumeEnded: () -> Void
     var onDark: () -> Void
     var onLink: () -> Void
 
@@ -700,6 +733,16 @@ private struct TalkBottomBar: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
         .glassEffect(.regular, in: Capsule())
+        .overlay(alignment: .topLeading) {
+            if showVolume {
+                VerticalListenSlider(
+                    session: session,
+                    onChanged: onVolumeChanged,
+                    onEnded: onVolumeEnded
+                )
+                .offset(x: 14, y: -156)
+            }
+        }
         .accessibilityElement(children: .contain)
     }
 
@@ -780,32 +823,82 @@ private struct ListenModeButton: View {
     }
 }
 
-private struct ListenVolumeBar: View {
+private struct VerticalListenSlider: View {
     @ObservedObject var session: WalkieSession
+    var onChanged: () -> Void
+    var onEnded: () -> Void
+    @State private var lastStep = -1
+
+    private static let trackWidth: CGFloat = 36
+    private static let trackHeight: CGFloat = 148
+    private static let steps = 20
+    /// #3EE6D0
+    private static let level = Color(red: 62.0 / 255.0, green: 230.0 / 255.0, blue: 208.0 / 255.0)
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "speaker.fill")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Slider(
-                value: Binding(
-                    get: { session.listenGain },
-                    set: { session.setListenGain($0) }
-                ),
-                in: 0...1
-            )
-            .tint(Aurora.teal)
-            Image(systemName: "speaker.wave.3.fill")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+        GeometryReader { geo in
+            levelTrack(in: geo.size)
+                .contentShape(Capsule())
+                .gesture(drag(in: geo.size))
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: 280)
-        .glassEffect(.regular, in: Capsule())
-        .accessibilityElement(children: .combine)
+        .frame(width: Self.trackWidth, height: Self.trackHeight)
+        .accessibilityElement()
         .accessibilityLabel(session.t(.incomingVolume))
+        .accessibilityValue(percentLabel)
+        .accessibilityAdjustableAction { direction in
+            let delta = direction == .increment ? 0.05 : -0.05
+            apply(session.listenGain + delta)
+        }
+        .onAppear {
+            lastStep = step(for: session.listenGain)
+        }
+    }
+
+    private var percentLabel: String {
+        "\(Int((session.listenGain * 100).rounded()))%"
+    }
+
+    private func levelTrack(in size: CGSize) -> some View {
+        let fraction = CGFloat(min(1, max(0, session.listenGain)))
+        let inner = max(0, size.height - 8)
+        let filled = inner * fraction
+        let nub: CGFloat = fraction > 0 ? 10 : 0
+        return Capsule()
+            .fill(Color.white.opacity(0.06))
+            .frame(width: size.width, height: size.height)
+            .glassEffect(.regular, in: Capsule())
+            .overlay(alignment: .bottom) {
+                Capsule()
+                    .fill(Self.level)
+                    .frame(width: max(0, size.width - 8), height: max(nub, filled))
+                    .padding(.bottom, 4)
+            }
+            .clipShape(Capsule())
+    }
+
+    private func drag(in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let span = max(size.height, 1)
+                let y = min(max(0, value.location.y), span)
+                apply(1 - Double(y / span))
+                onChanged()
+            }
+            .onEnded { _ in
+                onEnded()
+            }
+    }
+
+    private func apply(_ gain: Double) {
+        session.setListenGain(gain)
+        let next = step(for: session.listenGain)
+        guard next != lastStep else { return }
+        lastStep = next
+        session.haptics.tickVolume()
+    }
+
+    private func step(for gain: Double) -> Int {
+        Int((min(1, max(0, gain)) * Double(Self.steps)).rounded())
     }
 }
 

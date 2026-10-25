@@ -25,6 +25,7 @@ final class WalkieHaptics {
     private let release: UIImpactFeedbackGenerator
     private let remoteStart: UINotificationFeedbackGenerator
     private let remoteStop: UIImpactFeedbackGenerator
+    private let volumeTick: UIImpactFeedbackGenerator
 
     init() {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -32,6 +33,7 @@ final class WalkieHaptics {
         release = UIImpactFeedbackGenerator(style: .soft)
         remoteStart = UINotificationFeedbackGenerator()
         remoteStop = UIImpactFeedbackGenerator(style: .light)
+        volumeTick = UIImpactFeedbackGenerator(style: .light)
         prepareNow()
     }
 
@@ -55,6 +57,11 @@ final class WalkieHaptics {
         onMain { self.fireRemoteStop() }
     }
 
+    /// One light tick when the in-app volume crosses a step. Talk haptics are unchanged.
+    func tickVolume() {
+        onMain { self.fireVolumeTick() }
+    }
+
     /// Volume-up and the on-screen press both land here. Fire immediately on
     /// the main thread; hop if a caller is not already there.
     private func onMain(_ work: @escaping () -> Void) {
@@ -70,6 +77,7 @@ final class WalkieHaptics {
         release.prepare()
         remoteStart.prepare()
         remoteStop.prepare()
+        volumeTick.prepare()
     }
 
     private func firePress() {
@@ -93,6 +101,11 @@ final class WalkieHaptics {
     private func fireRemoteStop() {
         remoteStop.impactOccurred(intensity: 0.35)
         remoteStop.prepare()
+    }
+
+    private func fireVolumeTick() {
+        volumeTick.impactOccurred(intensity: 0.4)
+        volumeTick.prepare()
     }
 }
 
