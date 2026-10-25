@@ -11,6 +11,9 @@ struct ContentView: View {
     @State private var showListenToast = false
     @State private var showListenVolume = false
     @State private var showChannelMenu = false
+    @State private var channelSheet: ChannelFlow?
+    @State private var confirmLeave = false
+    @State private var pendingLeaveID = ""
     @State private var listenHide: Task<Void, Never>?
     @State private var volumeHide: Task<Void, Never>?
 
@@ -97,6 +100,25 @@ struct ContentView: View {
                     AuroraBackground(live: auroraLive)
                 }
         }
+        .sheet(item: $channelSheet) { flow in
+            ChannelFlowSheet(session: session, flow: flow)
+                .presentationBackground {
+                    AuroraBackground(live: auroraLive)
+                }
+        }
+        .confirmationDialog(leaveDialogTitle, isPresented: $confirmLeave, titleVisibility: .visible) {
+            Button(session.t(.leaveGroup), role: .destructive) {
+                let id = pendingLeaveID
+                pendingLeaveID = ""
+                guard !id.isEmpty else { return }
+                session.leaveGroup(id)
+            }
+            Button(session.t(.cancel), role: .cancel) {
+                pendingLeaveID = ""
+            }
+        } message: {
+            Text(session.t(.leaveGroupBody))
+        }
         .alert(session.suggestsSettings ? session.t(.microphone) : session.t(.headsUp), isPresented: errorPresented) {
             Button(session.t(.ok), role: .cancel) {}
             if session.suggestsSettings {
@@ -122,6 +144,9 @@ struct ContentView: View {
                         Spacer(minLength: 0)
                         talkButton(side: side)
                         HomePresence(session: session)
+                            .padding(.leading, showListenVolume ? 112 : 0)
+                            .animation(.easeOut(duration: 0.2), value: showListenVolume)
+                        captionBar
                         Spacer(minLength: 0)
                         TalkBottomBar(
                             session: session,
@@ -152,12 +177,11 @@ struct ContentView: View {
                 listenChrome
                     .padding(.bottom, 92)
             }
-            .overlayPreferenceValue(VolumeButtonAnchorKey.self) { rect in
+            .overlay {
                 GeometryReader { proxy in
-                    if showListenVolume && rect.width > 1 {
+                    if showListenVolume && proxy.size.width > 1 {
                         ListenVolumePopover(
                             session: session,
-                            anchor: rect,
                             bounds: proxy.size,
                             onDismiss: hideListenVolume,
                             onInteract: pokeListenVolume
@@ -174,7 +198,9 @@ struct ContentView: View {
                             anchor: rect,
                             bounds: proxy.size,
                             onDismiss: hideChannelMenu,
-                            onSelect: chooseChannel
+                            onSelect: chooseChannel,
+                            onFlow: openChannelFlow,
+                            onLeave: askLeaveGroup
                         )
                         .transition(.opacity)
                     }
@@ -311,6 +337,36 @@ struct ContentView: View {
             session.haptics.tickSelection()
         }
         hideChannelMenu()
+    }
+
+    private func openChannelFlow(_ flow: ChannelFlow) {
+        session.haptics.tickSelection()
+        hideChannelMenu()
+        channelSheet = flow
+    }
+
+    private func askLeaveGroup() {
+        pendingLeaveID = session.talkGroup
+        session.haptics.tickSelection()
+        hideChannelMenu()
+        confirmLeave = true
+    }
+
+    private var leaveDialogTitle: String {
+        let id = pendingLeaveID.isEmpty ? session.talkGroup : pendingLeaveID
+        let label = session.groups.first { $0.id == id }?.name ?? session.room
+        let name = label.isEmpty ? id : label
+        return session.tf(.leaveGroupAsk, name)
+    }
+
+    @ViewBuilder
+    private var captionBar: some View {
+        if session.captionsEnabled && !session.captionText.isEmpty {
+            CaptionBar(speaker: session.captionSpeaker, text: session.captionText)
+                .opacity(session.captionVisible ? 1 : 0)
+                .padding(.horizontal, 112)
+                .animation(.easeOut(duration: 0.45), value: session.captionVisible)
+        }
     }
 
     private var channelPillAnchor: some View {
@@ -801,6 +857,8 @@ private struct ChannelMenuPopover: View {
     var bounds: CGSize
     var onDismiss: () -> Void
     var onSelect: (String) -> Void
+    var onFlow: (ChannelFlow) -> Void
+    var onLeave: () -> Void
     @State private var revealed = false
 
     var body: some View {
@@ -838,8 +896,26 @@ private struct ChannelMenuPopover: View {
     }
 
     private var menuHeightLimit: CGFloat {
-        let room = bounds.height - gap - 16
-        return min(420, max(140, room))
+        let room = bounds.height - gap - 16 - actionBlockHeight
+        return min(420, max(80, room))
+    }
+
+    private var actionBlockHeight: CGFloat {
+        var rows: CGFloat = 2
+        if inviteRoom != nil { rows += 1 }
+        if canLeave { rows += 1 }
+        return 20 + rows * 44
+    }
+
+    private var canLeave: Bool {
+        guard let group = session.groups.first(where: { $0.id == session.talkGroup }) else { return false }
+        return !group.direct
+    }
+
+    private var inviteRoom: String? {
+        guard let group = session.groups.first(where: { $0.id == session.talkGroup }) else { return nil }
+        guard group.admin, !group.direct else { return nil }
+        return group.id
     }
 
     private var groupRows: [WalkieGroup] {
@@ -852,23 +928,50 @@ private struct ChannelMenuPopover: View {
 
     private var menuCard: some View {
         GlassEffectContainer(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    channelSection(session.t(.groups), rows: groupRows)
-                    channelSection(session.t(.directSection), rows: directRows)
-                    if groupRows.isEmpty && directRows.isEmpty {
-                        Text(session.t(.noGroup))
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        channelSection(session.t(.groups), rows: groupRows)
+                        channelSection(session.t(.directSection), rows: directRows)
+                        if groupRows.isEmpty && directRows.isEmpty {
+                            Text(session.t(.noGroup))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                        }
+                    }
+                    .padding(8)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(maxHeight: menuHeightLimit)
+                Rectangle()
+                    .fill(Color.white.opacity(0.14))
+                    .frame(height: 1)
+                    .padding(.horizontal, 16)
+                    .accessibilityHidden(true)
+                VStack(spacing: 0) {
+                    ChannelMenuAction(symbol: "plus.circle", title: session.t(.newGroup)) {
+                        onFlow(.newGroup)
+                    }
+                    ChannelMenuAction(symbol: "person.badge.plus", title: session.t(.newDirectChat)) {
+                        onFlow(.newDirect)
+                    }
+                    if let room = inviteRoom {
+                        ChannelMenuAction(symbol: "person.crop.circle.badge.plus", title: session.t(.inviteToGroup)) {
+                            onFlow(.invite(room: room))
+                        }
+                    }
+                    if canLeave {
+                        ChannelMenuAction(symbol: "door.left.hand.open", title: session.t(.leaveGroup), destructive: true) {
+                            onLeave()
+                        }
                     }
                 }
-                .padding(8)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 6)
             }
-            .scrollBounceBehavior(.basedOnSize)
-            .frame(maxHeight: menuHeightLimit)
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
@@ -897,6 +1000,95 @@ private struct ChannelMenuPopover: View {
                 }
             }
         }
+    }
+}
+
+private enum ChannelFlow: Identifiable {
+    case newGroup
+    case newDirect
+    case invite(room: String)
+
+    var id: String {
+        switch self {
+        case .newGroup: return "newGroup"
+        case .newDirect: return "newDirect"
+        case .invite(let room): return "invite:\(room)"
+        }
+    }
+}
+
+private struct ChannelFlowSheet: View {
+    @ObservedObject var session: WalkieSession
+    var flow: ChannelFlow
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                GlassEffectContainer(spacing: 16) {
+                    flowContent
+                        .padding(16)
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(session.t(.done)) { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var title: String {
+        switch flow {
+        case .newGroup: return session.t(.newGroup)
+        case .newDirect: return session.t(.newDirectChat)
+        case .invite: return session.t(.inviteToGroup)
+        }
+    }
+
+    @ViewBuilder
+    private var flowContent: some View {
+        switch flow {
+        case .newGroup:
+            GroupEditor(session: session, createOnly: true, onCreated: { dismiss() })
+        case .newDirect:
+            DirectSection(session: session, searchOnly: true)
+        case .invite(let room):
+            InviteComposer(session: session, room: room)
+        }
+    }
+}
+
+private struct ChannelMenuAction: View {
+    var symbol: String
+    var title: String
+    var destructive = false
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(destructive ? Color.red : Aurora.teal)
+                    .frame(width: 24)
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(destructive ? Color.red : Color.primary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
     }
 }
 
@@ -1037,7 +1229,6 @@ private struct TalkBottomBar: View {
             .buttonStyle(.plain)
             .accessibilityLabel(session.t(.incomingVolume))
             .accessibilityValue(volumeLabel)
-            .background(volumeAnchor)
             TalkIconButton(systemImage: "moon.fill", title: session.t(.darkMode), tint: .primary, action: onDark)
             if link == .connect {
                 Button(action: onLink) {
@@ -1061,13 +1252,6 @@ private struct TalkBottomBar: View {
 
     private var volumeLabel: String {
         "\(Int((session.listenGain * 100).rounded())) %"
-    }
-
-    private var volumeAnchor: some View {
-        GeometryReader { proxy in
-            Color.clear.preference(key: VolumeButtonAnchorKey.self, value: proxy.frame(in: .named("talk")))
-        }
-        .allowsHitTesting(false)
     }
 
     private var speakerTint: Color {
@@ -1115,29 +1299,17 @@ private struct TalkBottomBar: View {
     }
 }
 
-private struct VolumeButtonAnchorKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        let next = nextValue()
-        if next.width > 0 {
-            value = next
-        }
-    }
-}
-
 /// Full-screen layer so the slider's frame sits inside a parent that can hit-test it.
-/// An offset overlay on the short bottom bar drew the capsule but never received the drag.
+/// It stays on the leading edge of the lower half, clear of the talker line and captions.
 private struct ListenVolumePopover: View {
     @ObservedObject var session: WalkieSession
-    var anchor: CGRect
     var bounds: CGSize
     var onDismiss: () -> Void
     var onInteract: () -> Void
 
-    private static let gap: CGFloat = 10
-    private static let blockWidth: CGFloat = 64
-    private static let blockHeight: CGFloat = 172
+    private static let leadingInset: CGFloat = 16
+    private static let blockWidth: CGFloat = 88
+    private static let blockHeight: CGFloat = 292
 
     var body: some View {
         ZStack {
@@ -1164,17 +1336,43 @@ private struct ListenVolumePopover: View {
         "\(Int((session.listenGain * 100).rounded()))%"
     }
 
+    /// Leading edge sits 16 pt in. The column is only the slider, so the centered status stays clear.
     private var centerX: CGFloat {
-        let half = Self.blockWidth / 2
-        let lower = half + 8
-        let upper = max(lower, bounds.width - half - 8)
-        return min(max(anchor.midX, lower), upper)
+        Self.leadingInset + Self.blockWidth / 2
     }
 
+    /// Vertical center of the lower half, kept fully on screen.
     private var centerY: CGFloat {
         let half = Self.blockHeight / 2
-        let preferred = anchor.minY - Self.gap - half
-        return max(preferred, half + 8)
+        let preferred = bounds.height * 0.75
+        let lower = half + 8
+        let upper = max(lower, bounds.height - half - 8)
+        return min(max(preferred, lower), upper)
+    }
+}
+
+private struct CaptionBar: View {
+    var speaker: String
+    var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if !speaker.isEmpty {
+                Text(speaker)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Text(text)
+                .font(.body.weight(.medium))
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(3)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1207,7 +1405,8 @@ private struct VerticalListenSlider: View {
     @State private var actions = VolumeDragActions()
 
     private static let trackWidth: CGFloat = 44
-    private static let trackHeight: CGFloat = 140
+    private static let touchWidth: CGFloat = 88
+    private static let trackHeight: CGFloat = 260
 
     var body: some View {
         ZStack {
@@ -1217,13 +1416,13 @@ private struct VerticalListenSlider: View {
                 height: Self.trackHeight
             )
             VolumeDragTarget(
-                width: Self.trackWidth,
+                width: Self.touchWidth,
                 height: Self.trackHeight,
                 actions: actions
             )
             .equatable()
         }
-        .frame(width: Self.trackWidth, height: Self.trackHeight)
+        .frame(width: Self.touchWidth, height: Self.trackHeight)
         .accessibilityElement()
         .accessibilityLabel(session.t(.incomingVolume))
         .accessibilityValue(percentLabel)
@@ -1346,6 +1545,13 @@ private struct HomeMenu: View {
                         SettingsBlock(session.t(.groups)) {
                             GroupEditor(session: session)
                         }
+                        SettingsBlock(session.t(.captions)) {
+                            Toggle(session.t(.captions), isOn: captionsEnabled)
+                                .font(.body.weight(.semibold))
+                            Text(session.t(.captionsHint))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         SettingsBlock(session.t(.contacts)) {
                             DirectSection(session: session)
                         }
@@ -1403,6 +1609,13 @@ private struct HomeMenu: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var captionsEnabled: Binding<Bool> {
+        Binding(
+            get: { session.captionsEnabled },
+            set: { session.setCaptionsEnabled($0) }
+        )
     }
 
     private var language: Binding<AppLanguage> {
@@ -1737,6 +1950,8 @@ private struct SignUpWindow: View {
 
 private struct GroupEditor: View {
     @ObservedObject var session: WalkieSession
+    var createOnly = false
+    var onCreated: (@MainActor () -> Void)? = nil
     @State private var draftName = ""
     @State private var draftPassword = ""
 
@@ -1761,12 +1976,17 @@ private struct GroupEditor: View {
                 .autocorrectionDisabled()
                 .textContentType(.password)
                 .glassFieldChrome()
-            HStack(spacing: 8) {
+            if createOnly {
                 CapsuleChoice(title: session.t(.createGroup), prominent: true, height: 48, expands: true, action: createTapped)
-                CapsuleChoice(title: joinTitle, prominent: false, height: 48, expands: true, action: joinTapped)
+                    .frame(maxWidth: .infinity)
+            } else {
+                HStack(spacing: 8) {
+                    CapsuleChoice(title: session.t(.createGroup), prominent: true, height: 48, expands: true, action: createTapped)
+                    CapsuleChoice(title: joinTitle, prominent: false, height: 48, expands: true, action: joinTapped)
+                }
+                .frame(maxWidth: .infinity)
+                GroupList(session: session)
             }
-            .frame(maxWidth: .infinity)
-            GroupList(session: session)
         }
     }
 
@@ -1779,6 +1999,7 @@ private struct GroupEditor: View {
         if saved {
             draftName = ""
             draftPassword = ""
+            onCreated?()
         }
     }
 
@@ -1878,6 +2099,7 @@ private struct CapsuleChoice: View {
 
 private struct DirectSection: View {
     @ObservedObject var session: WalkieSession
+    var searchOnly = false
     @State private var username = ""
     @State private var fieldHeight: CGFloat = 52
 
@@ -1920,8 +2142,10 @@ private struct DirectSection: View {
             ForEach(session.directRequests) { request in
                 DirectRequestRow(session: session, request: request)
             }
-            ForEach(session.groups.filter(\.direct)) { group in
-                GroupRow(session: session, group: group)
+            if !searchOnly {
+                ForEach(session.groups.filter(\.direct)) { group in
+                    GroupRow(session: session, group: group)
+                }
             }
         }
     }
@@ -2051,6 +2275,7 @@ private struct GroupRow: View {
     let group: WalkieGroup
     @State private var confirmDirect = false
     @State private var confirmReport = false
+    @State private var confirmLeave = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2084,6 +2309,15 @@ private struct GroupRow: View {
                 .accessibilityLabel(session.tf(.removeNamed, group.name))
             }
             Toggle(session.t(.listen), isOn: listenBinding)
+            if !group.direct {
+                Button(role: .destructive, action: { confirmLeave = true }) {
+                    Text(session.t(.leaveGroup))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+            }
             if group.direct && !group.peer.isEmpty {
                 HStack(spacing: 8) {
                     Button(blockTitle) { session.setBlocked(group.peer, !session.isBlocked(group.peer)) }
@@ -2114,6 +2348,12 @@ private struct GroupRow: View {
             Button(session.t(.cancel), role: .cancel) {}
         } message: {
             Text(session.t(.reportStored))
+        }
+        .confirmationDialog(session.tf(.leaveGroupAsk, group.name), isPresented: $confirmLeave, titleVisibility: .visible) {
+            Button(session.t(.leaveGroup), role: .destructive) { session.leaveGroup(group.id) }
+            Button(session.t(.cancel), role: .cancel) {}
+        } message: {
+            Text(session.t(.leaveGroupBody))
         }
     }
 
@@ -2165,24 +2405,38 @@ private struct GroupRow: View {
     }
 }
 
+private struct InviteComposer: View {
+    @ObservedObject var session: WalkieSession
+    let room: String
+    @State private var inviteName = ""
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField(session.t(.username), text: $inviteName)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.send)
+                .onSubmit(invite)
+                .glassFieldChrome()
+            Button(session.t(.invite), action: invite)
+                .buttonStyle(.glass)
+        }
+    }
+
+    private func invite() {
+        let saved = session.invite(room: room, username: inviteName)
+        if saved { inviteName = "" }
+    }
+}
+
 private struct AdminTools: View {
     @ObservedObject var session: WalkieSession
     let group: WalkieGroup
-    @State private var inviteName = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             PasswordEditor(session: session, groupID: group.id, locked: group.locked)
-            HStack(spacing: 8) {
-                TextField(session.t(.username), text: $inviteName)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.send)
-                    .onSubmit(invite)
-                    .glassFieldChrome()
-                Button(session.t(.invite), action: invite)
-                    .buttonStyle(.glass)
-            }
+            InviteComposer(session: session, room: group.id)
             ForEach(pendingRequests) { request in
                 RequestRow(session: session, request: request)
             }
@@ -2191,11 +2445,6 @@ private struct AdminTools: View {
 
     private var pendingRequests: [WalkieRequest] {
         session.requests.filter { $0.room == group.id }
-    }
-
-    private func invite() {
-        let saved = session.invite(room: group.id, username: inviteName)
-        if saved { inviteName = "" }
     }
 }
 

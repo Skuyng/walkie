@@ -573,6 +573,61 @@ async function startServer() {
       return message.t === 'inbox' && (message.groups || []).some((group) => group.direct === true && group.peer === 'ada');
     } catch { return false; }
   }, 4000, reask);
+  const tempAt = again.inbox.length;
+  send(again, { t: 'createGroup', name: 'Midlertidig' });
+  await waitFor(again.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.id === 'midlertidig' && group.admin === true);
+    } catch { return false; }
+  }, 4000, tempAt);
+  send(again, { t: 'invite', room: 'midlertidig', username: 'bob' });
+  await waitFor(bobAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.invites || []).some((item) => item.room === 'midlertidig');
+    } catch { return false; }
+  });
+  send(bobAgain, { t: 'inviteReply', room: 'midlertidig', accept: true });
+  await waitFor(bobAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.id === 'midlertidig' && group.admin !== true);
+    } catch { return false; }
+  });
+  const leftAt = again.inbox.length;
+  const heirAt = bobAgain.inbox.length;
+  send(again, { t: 'leave', room: 'midlertidig' });
+  await waitFor(again.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && !(message.groups || []).some((group) => group.id === 'midlertidig');
+    } catch { return false; }
+  }, 4000, leftAt);
+  const heir = jsonText(await waitFor(bobAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.id === 'midlertidig' && group.admin === true);
+    } catch { return false; }
+  }, 4000, heirAt));
+  if (!heir.groups.some((group) => group.id === 'midlertidig' && group.admin)) throw new Error('admin was not transferred');
+  const goneAt = bobAgain.inbox.length;
+  send(bobAgain, { t: 'leave', room: 'midlertidig' });
+  await waitFor(bobAgain.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && !(message.groups || []).some((group) => group.id === 'midlertidig');
+    } catch { return false; }
+  }, 4000, goneAt);
+  const afterLeave = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+  if ((afterLeave.groups || []).some((group) => group.id === 'midlertidig')) throw new Error('empty group was kept');
+
   const deleteAt = again.inbox.length;
   const caraDeleteAt = caraAgain.inbox.length;
   send(again, { t: 'deleteAccount' });

@@ -409,10 +409,31 @@ class JsonStore {
 
   leave(userId, groupId) {
     return this.enqueue(async () => {
+      const group = this.data.groups.find((item) => item.id === groupId);
+      if (!group || group.direct) throw new StoreError('Fant ikke gruppen');
       const member = this.data.members.find((item) => item.groupId === groupId && item.userId === userId);
       if (!member) return;
-      if (member.role === 'admin') throw new StoreError('Slett gruppen i stedet.');
-      this.data.members = this.data.members.filter((item) => item !== member);
+      if (member.role === 'admin') {
+        const next = oldestOther(this.data.members.filter((item) => item.groupId === groupId), userId);
+        if (!next) {
+          this.data.groups = this.data.groups.filter((item) => item.id !== groupId);
+          this.data.members = this.data.members.filter((item) => item.groupId !== groupId);
+          this.data.invites = this.data.invites.filter((item) => item.groupId !== groupId);
+          this.data.requests = this.data.requests.filter((item) => item.groupId !== groupId);
+          this.save();
+          return;
+        }
+        next.role = 'admin';
+        group.ownerId = next.userId;
+      }
+      this.data.members = this.data.members.filter((item) => !(item.groupId === groupId && item.userId === userId));
+      this.data.invites = this.data.invites.filter((item) => !(item.groupId === groupId && (item.userId === userId || item.fromId === userId)));
+      this.data.requests = this.data.requests.filter((item) => !(item.groupId === groupId && item.userId === userId));
+      if (!this.data.members.some((item) => item.groupId === groupId)) {
+        this.data.groups = this.data.groups.filter((item) => item.id !== groupId);
+        this.data.invites = this.data.invites.filter((item) => item.groupId !== groupId);
+        this.data.requests = this.data.requests.filter((item) => item.groupId !== groupId);
+      }
       this.save();
     });
   }
@@ -1199,10 +1220,52 @@ class PgStore {
   }
 
   async leave(userId, groupId) {
-    const member = await this.pool.query('SELECT role FROM members WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
-    if (!member.rowCount) return;
-    if (member.rows[0].role === 'admin') throw new StoreError('Slett gruppen i stedet.');
-    await this.pool.query('DELETE FROM members WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const group = await client.query('SELECT direct FROM groups WHERE id = $1', [groupId]);
+      if (!group.rowCount || group.rows[0].direct) throw new StoreError('Fant ikke gruppen');
+      const member = await client.query(
+        'SELECT role FROM members WHERE group_id = $1 AND user_id = $2',
+        [groupId, userId]
+      );
+      if (!member.rowCount) {
+        await client.query('COMMIT');
+        return;
+      }
+      if (member.rows[0].role === 'admin') {
+        const next = await client.query(
+          `SELECT user_id FROM members WHERE group_id = $1 AND user_id <> $2
+           ORDER BY joined_at ASC, user_id ASC LIMIT 1`,
+          [groupId, userId]
+        );
+        if (!next.rowCount) {
+          await client.query('DELETE FROM groups WHERE id = $1', [groupId]);
+          await client.query('COMMIT');
+          return;
+        }
+        const heir = next.rows[0].user_id;
+        await client.query(
+          `UPDATE members SET role = 'admin' WHERE group_id = $1 AND user_id = $2`,
+          [groupId, heir]
+        );
+        await client.query('UPDATE groups SET owner_id = $2 WHERE id = $1', [groupId, heir]);
+      }
+      await client.query('DELETE FROM members WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+      await client.query(
+        'DELETE FROM invites WHERE group_id = $1 AND (user_id = $2 OR from_id = $2)',
+        [groupId, userId]
+      );
+      await client.query('DELETE FROM requests WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+      const left = await client.query('SELECT 1 FROM members WHERE group_id = $1 LIMIT 1', [groupId]);
+      if (!left.rowCount) await client.query('DELETE FROM groups WHERE id = $1', [groupId]);
+      await client.query('COMMIT');
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch {}
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async deleteGroup(adminId, groupId) {

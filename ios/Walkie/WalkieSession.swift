@@ -41,6 +41,10 @@ final class WalkieSession: ObservableObject {
     @Published var quietToMinutes = 7 * 60
     @Published private(set) var heardClips: [String: HeardClip] = [:]
     @Published private(set) var language: AppLanguage = .nb
+    @Published private(set) var captionsEnabled: Bool
+    @Published private(set) var captionText = ""
+    @Published private(set) var captionSpeaker = ""
+    @Published private(set) var captionVisible = false
 
     var statusText: String {
         L10n.text(statusCode.key, language)
@@ -61,6 +65,21 @@ final class WalkieSession: ObservableObject {
     func setLanguage(_ next: AppLanguage) {
         language = next
         defaults.set(next.rawValue, forKey: Key.language)
+        captions.setLocale(Self.speechLocale(next))
+    }
+
+    func setCaptionsEnabled(_ on: Bool) {
+        captionsEnabled = on
+        defaults.set(on, forKey: Key.captions)
+        captions.setEnabled(on)
+        if on {
+            captions.requestAuthorizationIfNeeded()
+        } else {
+            captionFade?.cancel()
+            captionVisible = false
+            captionText = ""
+            captionSpeaker = ""
+        }
     }
 
     var canTransmit: Bool {
@@ -148,6 +167,7 @@ final class WalkieSession: ObservableObject {
     let haptics = WalkieHaptics()
     let levels = AudioLevels()
     private let engine = VoiceEngine()
+    private let captions = CaptionEngine()
     private let socket = WalkieSocket()
     private let transmitter = HoldToTalkTransmitter()
     private let volumeButtons = VolumeButtonMonitor()
@@ -175,6 +195,7 @@ final class WalkieSession: ObservableObject {
     private var openHeard: [String: OpenHeard] = [:]
     private var heardAudio: [String: Data] = [:]
     private var pendingHeard = Data()
+    private var captionFade: Task<Void, Never>?
 
     private enum PendingAuth {
         case signup(user: String, display: String, password: String)
@@ -204,12 +225,25 @@ final class WalkieSession: ObservableObject {
         quietHoursEnabled = defaults.bool(forKey: Key.quietEnabled)
         quietFromMinutes = Self.clampMinutes(defaults.object(forKey: Key.quietFrom) as? Int ?? (22 * 60))
         quietToMinutes = Self.clampMinutes(defaults.object(forKey: Key.quietTo) as? Int ?? (7 * 60))
+        if defaults.object(forKey: Key.captions) == nil {
+            captionsEnabled = true
+        } else {
+            captionsEnabled = defaults.bool(forKey: Key.captions)
+        }
         engine.setListenGain(Float(listenGain))
         engine.setInboundChannel(talkGroup)
         engine.setSpeakerphone(listenOutput != .earpiece)
         engine.setIncomingMuted(Self.quietHoursCover(enabled: quietHoursEnabled, from: quietFromMinutes, to: quietToMinutes, at: Date()) || listenOutput == .mute)
         engine.attachLevelMeter(levels.wave)
         engine.activateForSystemVolume()
+        captions.setEnabled(captionsEnabled)
+        captions.setLocale(Self.speechLocale(language))
+        captions.onTranscript = { [weak self] line in
+            self?.applyCaption(line)
+        }
+        if captionsEnabled {
+            captions.requestAuthorizationIfNeeded()
+        }
 
         transmitter.signaling = self
         transmitter.onChange = { [weak self] talking in
@@ -231,6 +265,7 @@ final class WalkieSession: ObservableObject {
             let captured = data
             Task { @MainActor [weak self] in
                 self?.rememberIncoming(captured)
+                self?.captions.append(captured)
             }
         }
         engine.setCaptureHandler { [weak self] data in
@@ -646,6 +681,43 @@ final class WalkieSession: ObservableObject {
         }
         saveGroups()
         pushSubscribe()
+    }
+
+    /// Leave a group you belong to. Admin hands the role to the oldest other member.
+    /// An empty group is deleted. The live channel disconnects and the next one connects.
+    func leaveGroup(_ id: String) {
+        guard let group = groups.first(where: { $0.id == id }), !group.direct else { return }
+        guard signedIn, socketOpen else {
+            suggestsSettings = false
+            errorNotice = .key(.signIn)
+            return
+        }
+        socket.sendLeave(room: id)
+        let wasCurrent = talkGroup == id
+        groups.removeAll { $0.id == id }
+        membersByRoom[id] = nil
+        joinProblems[id] = nil
+        openHeard[id] = nil
+        heardAudio[id] = nil
+        heardClips[id] = nil
+        let leaving = talkers.filter { $0.room == id }
+        for talker in leaving {
+            removeTalker(id: talker.id, room: talker.room)
+        }
+        if wasCurrent {
+            if isTalking { endTransmitting() }
+            talkGroup = groups.first?.id ?? ""
+            parkInboundChannel()
+            syncRoomName()
+            saveGroups()
+            disconnect()
+            if !talkGroup.isEmpty {
+                connect()
+            }
+        } else {
+            saveGroups()
+            pushSubscribe()
+        }
     }
 
     var listenModeTitle: String {
@@ -1168,6 +1240,10 @@ final class WalkieSession: ObservableObject {
         selfID = ""
         talkers = []
         joinProblems = [:]
+        if captionsEnabled && !captionText.isEmpty {
+            captions.endUtterance()
+            scheduleCaptionFade()
+        }
     }
 
     private func startQuietClock() {
@@ -1343,6 +1419,13 @@ final class WalkieSession: ObservableObject {
         }
         if !local {
             haptics.remoteStarted()
+            if room == talkGroup {
+                captionSpeaker = remoteCaptionSpeaker
+                captionFade?.cancel()
+                if !captionText.isEmpty {
+                    captionVisible = true
+                }
+            }
         }
     }
 
@@ -1357,6 +1440,13 @@ final class WalkieSession: ObservableObject {
         }
         if !local {
             haptics.remoteStopped()
+            if room == talkGroup {
+                captionSpeaker = remoteCaptionSpeaker
+                if !remoteStillTalking(in: talkGroup) {
+                    captions.endUtterance()
+                    scheduleCaptionFade()
+                }
+            }
         }
         if !remoteStillTalking(in: room) {
             finishHeardClip(room)
@@ -1535,6 +1625,43 @@ final class WalkieSession: ObservableObject {
         static let quietFrom = "walkie.quiet.from"
         static let quietTo = "walkie.quiet.to"
         static let language = "walkie.language"
+        static let captions = "walkie.captions"
+    }
+
+    private static func speechLocale(_ language: AppLanguage) -> String {
+        language == .en ? "en-US" : "nb-NO"
+    }
+
+    private var remoteCaptionSpeaker: String {
+        talkers
+            .filter { $0.room == talkGroup && !isLocalTalker(id: $0.id, name: $0.name) }
+            .map(\.name)
+            .joined(separator: ", ")
+    }
+
+    private func applyCaption(_ line: String) {
+        guard captionsEnabled else { return }
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        captionText = trimmed
+        if captionSpeaker.isEmpty {
+            captionSpeaker = remoteCaptionSpeaker
+        }
+        captionFade?.cancel()
+        captionVisible = true
+    }
+
+    private func scheduleCaptionFade() {
+        captionFade?.cancel()
+        captionFade = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            captionVisible = false
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, !captionVisible else { return }
+            captionText = ""
+            captionSpeaker = ""
+        }
     }
 
     private static func storedListenOutput(_ defaults: UserDefaults) -> ListenOutput {

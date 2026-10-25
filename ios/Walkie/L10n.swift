@@ -204,6 +204,14 @@ enum LKey {
     case receiving
     case opensSettings
     case opensChannels
+    case newGroup
+    case newDirectChat
+    case inviteToGroup
+    case leaveGroup
+    case leaveGroupAsk
+    case leaveGroupBody
+    case captions
+    case captionsHint
     case roomLine
     case speakingIn
     case speakingTail
@@ -338,6 +346,14 @@ enum L10n {
         case .receiving: return english ? "Receiving" : "Mottar"
         case .opensSettings: return english ? "Opens settings" : "Åpner innstillinger"
         case .opensChannels: return english ? "Opens channels" : "Åpner kanaler"
+        case .newGroup: return english ? "New group" : "Ny gruppe"
+        case .newDirectChat: return english ? "New direct chat" : "Ny direktechat"
+        case .inviteToGroup: return english ? "Invite to group" : "Inviter til gruppen"
+        case .leaveGroup: return english ? "Leave group" : "Forlat gruppe"
+        case .leaveGroupAsk: return english ? "Leave %@?" : "Forlate %@?"
+        case .leaveGroupBody: return english ? "You leave this group. If you are the admin, the oldest member becomes admin. An empty group is deleted." : "Du forlater gruppen. Er du admin, får det eldste medlemmet admin. En tom gruppe slettes."
+        case .captions: return english ? "Captions (beta)" : "Teksting (beta)"
+        case .captionsHint: return english ? "On-device text for incoming speech on this channel." : "Tekst på enheten for innkommende tale på denne kanalen."
         case .roomLine: return "%@: %@"
         case .speakingIn: return english ? "%@ in %@" : "%@ i %@"
         case .speakingTail: return english ? "talking" : "snakker"
