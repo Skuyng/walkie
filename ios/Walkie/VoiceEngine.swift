@@ -42,6 +42,8 @@ final class VoiceEngine {
     private let queue = DispatchQueue(label: "com.skuyng.walkie.audio", qos: .userInteractive)
     private let micOpen = OSAllocatedUnfairLock(initialState: false)
     private let handlerLock = NSLock()
+    private let levelMeterLock = NSLock()
+    private var levelMeter: LevelMeter?
     private var capture: ((Data) -> Void)?
 
     private var engine: AVAudioEngine?
@@ -115,11 +117,23 @@ final class VoiceEngine {
         handlerLock.unlock()
     }
 
+    /// Latest mic and playback loudness. Written from the audio queue, read on main.
+    func attachLevelMeter(_ meter: LevelMeter) {
+        levelMeterLock.lock()
+        levelMeter = meter
+        levelMeterLock.unlock()
+    }
+
     /// Opens or closes the capture gate only. The `playAndRecord` session stays
     /// as it was for the whole connection; changing category or mode here makes
     /// iOS post volume events and looks like another button press.
     func setMicrophoneOpen(_ open: Bool) {
         micOpen.withLock { $0 = open }
+        if !open {
+            queue.async { [weak self] in
+                self?.currentLevelMeter()?.setMic(0)
+            }
+        }
     }
 
     func setSpeakerphone(_ enabled: Bool) {
@@ -450,6 +464,8 @@ final class VoiceEngine {
             engine.inputNode.removeTap(onBus: 0)
         }
         tapInstalled = false
+        currentLevelMeter()?.setMic(0)
+        currentLevelMeter()?.setRemote(0)
         engine?.stop()
         voicePlayer?.stop()
         beepPlayer?.stop()
@@ -471,12 +487,46 @@ final class VoiceEngine {
         guard micOpen.withLock({ $0 }), buffer.frameLength > 0 else { return }
         guard let copy = Self.copyBuffer(buffer) else { return }
         queue.async { [weak self] in
-            guard let self, self.shouldRun, let data = self.encode(copy), !data.isEmpty else { return }
+            guard let self else { return }
+            let open = self.micOpen.withLock { $0 }
+            self.currentLevelMeter()?.setMic(open ? Self.loudness(copy) : 0)
+            guard self.shouldRun, let data = self.encode(copy), !data.isEmpty else { return }
             self.handlerLock.lock()
             let handler = self.capture
             self.handlerLock.unlock()
             handler?(data)
         }
+    }
+
+    private func currentLevelMeter() -> LevelMeter? {
+        levelMeterLock.lock()
+        let meter = levelMeter
+        levelMeterLock.unlock()
+        return meter
+    }
+
+    /// RMS plus peak, lifted so a normal voice moves the meter and silence stays low.
+    private static func loudness(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let channels = buffer.floatChannelData else { return 0 }
+        let frames = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard frames > 0, channelCount > 0 else { return 0 }
+        let used = min(channelCount, 2)
+        var sum: Float = 0
+        var peak: Float = 0
+        for channel in 0..<used {
+            let samples = channels[channel]
+            for index in 0..<frames {
+                let sample = samples[index]
+                guard sample.isFinite else { continue }
+                let magnitude = abs(sample)
+                if magnitude > peak { peak = magnitude }
+                sum += sample * sample
+            }
+        }
+        let rms = sqrt(sum / Float(frames * used))
+        let mixed = min(1, rms * 5.5 + peak * 0.22)
+        return pow(mixed, Float(0.55))
     }
 
     private func encode(_ buffer: AVAudioPCMBuffer) -> Data? {
@@ -535,6 +585,7 @@ final class VoiceEngine {
         guard shouldRun, let decoder, let player = voicePlayer, let expected = playbackFormat else { return }
         let bytes = data.prefix(64_000)
         guard let wire = Self.wireBuffer(fromPCM16: bytes), let playback = decoder.convert(wire) else { return }
+        currentLevelMeter()?.setRemote(Self.loudness(wire))
         guard abs(playback.format.sampleRate - expected.sampleRate) < 1,
               playback.format.channelCount == expected.channelCount else { return }
         let now = Date()

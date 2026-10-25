@@ -111,6 +111,7 @@ final class WalkieSession: ObservableObject {
 
     private let defaults = UserDefaults.standard
     let haptics = WalkieHaptics()
+    let levels = AudioLevels()
     private let engine = VoiceEngine()
     private let socket = WalkieSocket()
     private let transmitter = HoldToTalkTransmitter()
@@ -149,6 +150,8 @@ final class WalkieSession: ObservableObject {
         accountUsername = defaults.string(forKey: Key.username) ?? ""
         speakerphone = defaults.object(forKey: Key.speakerphone) as? Bool ?? true
         engine.setSpeakerphone(speakerphone)
+        engine.attachLevelMeter(levels.meter)
+        levels.start()
         engine.activateForSystemVolume()
 
         transmitter.signaling = self

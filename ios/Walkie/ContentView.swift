@@ -343,11 +343,14 @@ private struct TalkButton: View {
     var body: some View {
         TalkPressTarget(side: side, enabled: session.canTransmit, actions: actions)
             .equatable()
-            .overlay(TalkButtonFace(side: side, pressed: session.isTalking).allowsHitTesting(false))
             .overlay(
-                AuroraRings(pulsing: session.isTalking)
-                    .frame(width: side, height: side)
-                    .allowsHitTesting(false)
+                TalkButtonFace(
+                    side: side,
+                    levels: session.levels,
+                    transmitting: session.isTalking,
+                    receiving: !session.isTalking && !session.talkers.isEmpty
+                )
+                .allowsHitTesting(false)
             )
             .opacity(session.canTransmit ? 1 : 0.45)
             .onAppear(perform: bindActions)
@@ -395,7 +398,27 @@ private struct TalkPressTarget: View, Equatable {
 
 private struct TalkButtonFace: View {
     var side: CGFloat
-    var pressed: Bool
+    var levels: AudioLevels
+    var transmitting: Bool
+    var receiving: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(.clear)
+                .background(.ultraThinMaterial, in: Circle())
+                .glassEffect(.regular.tint(Color.white.opacity(0.12)), in: Circle())
+            TalkLevelFill(levels: levels, transmitting: transmitting, receiving: receiving)
+                .clipShape(Circle())
+            TalkButtonLabel(side: side)
+        }
+        .frame(width: side, height: side)
+        .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 1))
+    }
+}
+
+private struct TalkButtonLabel: View {
+    var side: CGFloat
 
     var body: some View {
         VStack(spacing: 8) {
@@ -407,13 +430,8 @@ private struct TalkButtonFace: View {
                 .lineLimit(1)
                 .frame(width: side - 48, height: 28)
         }
-        .foregroundStyle(pressed ? Aurora.teal : Color.primary)
-        .frame(width: side, height: side)
-        .background(.ultraThinMaterial, in: Circle())
-        .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 1))
-        .glassEffect(.regular.tint(Color.white.opacity(0.15)), in: Circle())
-        .scaleEffect(pressed ? 0.94 : 1)
-        .animation(.spring(response: 0.22, dampingFraction: 0.72), value: pressed)
+        .foregroundStyle(.white)
+        .shadow(color: .black.opacity(0.55), radius: 6, y: 1)
     }
 }
 

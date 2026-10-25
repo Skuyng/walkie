@@ -154,53 +154,199 @@ private struct AuroraBlob: View {
     }
 }
 
-struct AuroraRings: View {
-    var pulsing: Bool
+/// Thread-safe raw loudness. The audio queue writes; the main pump reads.
+final class LevelMeter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var mic: Float = 0
+    private var remote: Float = 0
+    private var micAt = Date.distantPast
+    private var remoteAt = Date.distantPast
+
+    func setMic(_ value: Float) {
+        lock.lock()
+        mic = value
+        micAt = Date()
+        lock.unlock()
+    }
+
+    func setRemote(_ value: Float) {
+        lock.lock()
+        remote = value
+        remoteAt = Date()
+        lock.unlock()
+    }
+
+    func sample() -> (mic: Float, remote: Float) {
+        lock.lock()
+        let now = Date()
+        let micValue = now.timeIntervalSince(micAt) > 0.12 ? Float(0) : mic
+        let remoteValue = now.timeIntervalSince(remoteAt) > 0.22 ? Float(0) : remote
+        lock.unlock()
+        return (micValue, remoteValue)
+    }
+}
+
+/// Smoothed levels, published on the main thread at about 45 fps while audio is live.
+@MainActor
+final class AudioLevels: ObservableObject {
+    @Published private(set) var mic: Float = 0
+    @Published private(set) var remote: Float = 0
+    let meter = LevelMeter()
+    private var task: Task<Void, Never>?
+    private var micState: Float = 0
+    private var remoteState: Float = 0
+
+    func start() {
+        guard task == nil else { return }
+        task = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let sample = self.meter.sample()
+                let micNext = Self.follow(self.micState, sample.mic)
+                let remoteNext = Self.follow(self.remoteState, sample.remote)
+                self.micState = micNext
+                self.remoteState = remoteNext
+                self.assignMic(micNext)
+                self.assignRemote(remoteNext)
+                let live = micNext > 0.02 || remoteNext > 0.02 || sample.mic > 0.02 || sample.remote > 0.02
+                try? await Task.sleep(for: .milliseconds(live ? 22 : 160))
+            }
+        }
+    }
+
+    private func assignMic(_ value: Float) {
+        let shown = value < 0.015 ? Float(0) : value
+        if abs(shown - mic) < 0.01 { return }
+        mic = shown
+    }
+
+    private func assignRemote(_ value: Float) {
+        let shown = value < 0.015 ? Float(0) : value
+        if abs(shown - remote) < 0.01 { return }
+        remote = shown
+    }
+
+    private static func follow(_ current: Float, _ target: Float) -> Float {
+        let rate: Float = target > current ? 0.62 : 0.34
+        return current + (target - current) * rate
+    }
+}
+
+/// Liquid fill clipped by the caller. Quiet while the mic is open and silent; hidden when idle.
+struct TalkLevelFill: View {
+    @ObservedObject var levels: AudioLevels
+    var transmitting: Bool
+    var receiving: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: pulsing ? 1.0 / 30.0 : 1)) { timeline in
-            AuroraRingStack(time: timeline.date.timeIntervalSinceReferenceDate, pulsing: pulsing)
+        TimelineView(.animation(minimumInterval: frameInterval)) { timeline in
+            TalkLevelCanvas(
+                time: timeline.date.timeIntervalSinceReferenceDate,
+                mic: CGFloat(levels.mic),
+                remote: CGFloat(levels.remote),
+                transmitting: transmitting,
+                receiving: receiving
+            )
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
+
+    private var frameInterval: Double {
+        (transmitting || receiving) ? 1.0 / 45.0 : 1
+    }
 }
 
-private struct AuroraRingStack: View {
+private struct TalkLevelCanvas: View {
     var time: TimeInterval
-    var pulsing: Bool
+    var mic: CGFloat
+    var remote: CGFloat
+    var transmitting: Bool
+    var receiving: Bool
 
     var body: some View {
-        ZStack {
-            AuroraRing(time: time, pulsing: pulsing, index: 0, color: Aurora.teal)
-            AuroraRing(time: time, pulsing: pulsing, index: 1, color: Aurora.green)
-            AuroraRing(time: time, pulsing: pulsing, index: 2, color: Aurora.violet)
+        Canvas { context, size in
+            TalkLevelDraw.draw(
+                context: &context,
+                size: size,
+                time: time,
+                mic: mic,
+                remote: remote,
+                transmitting: transmitting,
+                receiving: receiving
+            )
         }
     }
 }
 
-private struct AuroraRing: View {
-    var time: TimeInterval
-    var pulsing: Bool
-    var index: Int
-    var color: Color
-
-    var body: some View {
-        Circle()
-            .stroke(color.opacity(0.12 + 0.5 * wave), lineWidth: 2)
-            .frame(width: 180, height: 180)
-            .scaleEffect(scale)
+private enum TalkLevelDraw {
+    static func draw(
+        context: inout GraphicsContext,
+        size: CGSize,
+        time: TimeInterval,
+        mic: CGFloat,
+        remote: CGFloat,
+        transmitting: Bool,
+        receiving: Bool
+    ) {
+        guard transmitting || receiving, size.width > 1, size.height > 1 else { return }
+        let level = min(1, max(0, transmitting ? mic : remote))
+        let rise = transmitting ? (0.16 + level * 0.74) : (0.10 + level * 0.38)
+        let glow = transmitting ? (0.20 + level * 0.72) : (0.10 + level * 0.30)
+        let speed = transmitting ? 1.0 : 0.55
+        let energy = 0.03 + level * (transmitting ? 0.10 : 0.05)
+        context.clip(to: Path(ellipseIn: CGRect(origin: .zero, size: size)))
+        let layers = bands(transmitting: transmitting)
+        for (index, band) in layers.enumerated() {
+            let path = wavePath(
+                size: size,
+                time: time * speed,
+                rise: rise - CGFloat(index) * 0.04,
+                energy: energy,
+                frequency: band.frequency,
+                phase: band.phase
+            )
+            context.fill(path, with: .color(band.color.opacity(glow * band.gain)))
+        }
     }
 
-    private var wave: Double {
-        if !pulsing { return 0 }
-        return 0.5 + 0.5 * sin(time * 1.7 + Double(index) * 0.85)
+    private static func bands(transmitting: Bool) -> [(color: Color, frequency: Double, phase: Double, gain: Double)] {
+        if transmitting {
+            return [
+                (Aurora.violet, 1.15, 0.4, 0.55),
+                (Aurora.teal, 1.75, 1.8, 0.82),
+                (Aurora.green, 2.3, 3.0, 0.95)
+            ]
+        }
+        return [
+            (Aurora.violet, 0.75, 0.5, 0.65),
+            (Aurora.teal, 1.1, 2.0, 0.7)
+        ]
     }
 
-    private var scale: CGFloat {
-        let base = 1.05 + CGFloat(index) * 0.16
-        if !pulsing { return base }
-        return base + CGFloat(wave) * 0.1
+    private static func wavePath(
+        size: CGSize,
+        time: TimeInterval,
+        rise: CGFloat,
+        energy: CGFloat,
+        frequency: Double,
+        phase: Double
+    ) -> Path {
+        var path = Path()
+        let surface = size.height * (1 - max(0.05, rise))
+        path.move(to: CGPoint(x: 0, y: size.height))
+        let steps = 36
+        for step in 0...steps {
+            let t = CGFloat(step) / CGFloat(steps)
+            let along = Double(t)
+            let primary = sin(along * frequency * .pi * 2 + time * frequency + phase)
+            let secondary = sin(along * (frequency + 1.4) * .pi * 2 - time * 0.65 + phase)
+            let y = surface + CGFloat(primary * 0.72 + secondary * 0.28) * energy * size.height
+            path.addLine(to: CGPoint(x: t * size.width, y: y))
+        }
+        path.addLine(to: CGPoint(x: size.width, y: size.height))
+        path.closeSubpath()
+        return path
     }
 }
 
