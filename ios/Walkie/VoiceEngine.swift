@@ -43,7 +43,8 @@ final class VoiceEngine {
     private let micOpen = OSAllocatedUnfairLock(initialState: false)
     private let handlerLock = NSLock()
     private let levelMeterLock = NSLock()
-    private var levelMeter: LevelMeter?
+    private var levelMeter: WaveRing?
+    private let waveArmed = AtomicWord()
     private var capture: ((Data) -> Void)?
 
     private var engine: AVAudioEngine?
@@ -118,7 +119,7 @@ final class VoiceEngine {
     }
 
     /// Live waveform history. Written from the audio queue, read on main.
-    func attachLevelMeter(_ meter: LevelMeter) {
+    func attachLevelMeter(_ meter: WaveRing) {
         levelMeterLock.lock()
         levelMeter = meter
         levelMeterLock.unlock()
@@ -129,10 +130,9 @@ final class VoiceEngine {
     /// iOS post volume events and looks like another button press.
     func setMicrophoneOpen(_ open: Bool) {
         micOpen.withLock { $0 = open }
+        waveArmed.store(open ? 1 : 0)
         if !open {
-            queue.async { [weak self] in
-                self?.currentLevelMeter()?.clearMic()
-            }
+            currentLevelMeter()?.hideMic()
         }
     }
 
@@ -412,8 +412,13 @@ final class VoiceEngine {
         guard let inputFormat = tapFormat(for: engine) else {
             throw VoiceEngineError.noInput
         }
+        let ring = levelMeter
         engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            self?.handleInput(buffer)
+            guard let self else { return }
+            if self.waveArmed.load() != 0 {
+                ring?.writeMic(buffer)
+            }
+            self.handleInput(buffer)
         }
         tapInstalled = true
 
@@ -464,8 +469,8 @@ final class VoiceEngine {
             engine.inputNode.removeTap(onBus: 0)
         }
         tapInstalled = false
-        currentLevelMeter()?.clearMic()
-        currentLevelMeter()?.clearRemote()
+        currentLevelMeter()?.hideMic()
+        currentLevelMeter()?.hideRemote()
         engine?.stop()
         voicePlayer?.stop()
         beepPlayer?.stop()
@@ -488,12 +493,6 @@ final class VoiceEngine {
         guard let copy = Self.copyBuffer(buffer) else { return }
         queue.async { [weak self] in
             guard let self else { return }
-            let open = self.micOpen.withLock { $0 }
-            if open {
-                self.currentLevelMeter()?.appendMic(Self.wavePeaks(copy))
-            } else {
-                self.currentLevelMeter()?.clearMic()
-            }
             guard self.shouldRun, let data = self.encode(copy), !data.isEmpty else { return }
             self.handlerLock.lock()
             let handler = self.capture
@@ -502,49 +501,11 @@ final class VoiceEngine {
         }
     }
 
-    private func currentLevelMeter() -> LevelMeter? {
+    private func currentLevelMeter() -> WaveRing? {
         levelMeterLock.lock()
         let meter = levelMeter
         levelMeterLock.unlock()
         return meter
-    }
-
-    /// A few signed peaks from this buffer, so the trace follows the real waveform.
-    private static func wavePeaks(_ buffer: AVAudioPCMBuffer) -> [Float] {
-        guard let channels = buffer.floatChannelData else { return [] }
-        let frames = Int(buffer.frameLength)
-        let channelCount = Int(buffer.format.channelCount)
-        let rate = buffer.format.sampleRate
-        guard frames > 1, channelCount > 0, rate > 0 else { return [] }
-        let used = min(channelCount, 2)
-        let duration = Double(frames) / rate
-        let buckets = max(2, min(16, Int(duration / 0.0035)))
-        let chunk = max(1, frames / buckets)
-        var peaks: [Float] = []
-        peaks.reserveCapacity(buckets)
-        var start = 0
-        while start < frames && peaks.count < buckets {
-            let end = min(frames, start + chunk)
-            var chosen: Float = 0
-            var chosenAbs: Float = 0
-            for index in start..<end {
-                var mixed: Float = 0
-                for channel in 0..<used {
-                    mixed += channels[channel][index]
-                }
-                mixed /= Float(used)
-                guard mixed.isFinite else { continue }
-                let magnitude = abs(mixed)
-                if magnitude >= chosenAbs {
-                    chosenAbs = magnitude
-                    chosen = mixed
-                }
-            }
-            let boosted = chosen * 5.5
-            peaks.append(max(-1, min(1, boosted)))
-            start = end
-        }
-        return peaks
     }
 
     private func encode(_ buffer: AVAudioPCMBuffer) -> Data? {
@@ -603,7 +564,7 @@ final class VoiceEngine {
         guard shouldRun, let decoder, let player = voicePlayer, let expected = playbackFormat else { return }
         let bytes = data.prefix(64_000)
         guard let wire = Self.wireBuffer(fromPCM16: bytes), let playback = decoder.convert(wire) else { return }
-        currentLevelMeter()?.appendRemote(Self.wavePeaks(wire))
+        currentLevelMeter()?.writeRemote(wire)
         guard abs(playback.format.sampleRate - expected.sampleRate) < 1,
               playback.format.channelCount == expected.channelCount else { return }
         let now = Date()

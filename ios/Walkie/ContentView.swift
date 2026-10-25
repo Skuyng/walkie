@@ -411,7 +411,7 @@ private struct TalkButtonFace: View {
             Image(systemName: "mic.fill")
                 .font(.system(size: 52, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.2))
-            TalkLevelFill(levels: levels, transmitting: transmitting, receiving: receiving)
+            TalkLevelFill(wave: levels.wave, transmitting: transmitting, receiving: receiving)
                 .clipShape(Circle())
             Text("Talk")
                 .font(.title2.weight(.semibold))

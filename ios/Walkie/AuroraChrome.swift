@@ -1,3 +1,6 @@
+import AVFoundation
+import Darwin
+import QuartzCore
 import SwiftUI
 import UIKit
 
@@ -154,174 +157,248 @@ private struct AuroraBlob: View {
     }
 }
 
-/// Signed mic samples, oldest to newest. The audio queue writes; the button reads on main.
-final class LevelMeter: @unchecked Sendable {
-    static let length = 168
-    private let lock = NSLock()
-    private var mic = [Float](repeating: 0, count: LevelMeter.length)
-    private var remote = [Float](repeating: 0, count: LevelMeter.length)
-    private var micWrite = 0
-    private var remoteWrite = 0
-    private var remoteAt = Date.distantPast
+/// Hardware atomic. One writer publishes the cursor only after the slots are filled.
+final class AtomicWord: @unchecked Sendable {
+    private var raw = Int64(0)
 
-    func appendMic(_ samples: [Float]) {
-        lock.lock()
-        append(samples, into: &mic, write: &micWrite)
-        lock.unlock()
+    func load() -> Int {
+        Int(OSAtomicAdd64Barrier(0, &raw))
     }
 
-    func appendRemote(_ samples: [Float]) {
-        lock.lock()
-        append(samples, into: &remote, write: &remoteWrite)
-        remoteAt = Date()
-        lock.unlock()
+    func store(_ newValue: Int) {
+        while true {
+            let seen = OSAtomicAdd64Barrier(0, &raw)
+            if OSAtomicCompareAndSwap64Barrier(seen, Int64(newValue), &raw) { return }
+        }
+    }
+}
+
+/// Lock-free sample history. The audio tap writes; Canvas reads. No @Published updates.
+final class WaveRing: @unchecked Sendable {
+    static let capacity = 512
+    private static let mask = capacity - 1
+
+    private let micValue: UnsafeMutablePointer<Float>
+    private let micTime: UnsafeMutablePointer<Double>
+    private let remoteValue: UnsafeMutablePointer<Float>
+    private let remoteTime: UnsafeMutablePointer<Double>
+    private let micCursor = AtomicWord()
+    private let remoteCursor = AtomicWord()
+    private let micHiddenBefore = AtomicWord()
+    private let remoteHiddenBefore = AtomicWord()
+
+    init() {
+        micValue = .allocate(capacity: Self.capacity)
+        micTime = .allocate(capacity: Self.capacity)
+        remoteValue = .allocate(capacity: Self.capacity)
+        remoteTime = .allocate(capacity: Self.capacity)
+        micValue.initialize(repeating: 0, count: Self.capacity)
+        micTime.initialize(repeating: 0, count: Self.capacity)
+        remoteValue.initialize(repeating: 0, count: Self.capacity)
+        remoteTime.initialize(repeating: 0, count: Self.capacity)
     }
 
-    func clearMic() {
-        lock.lock()
-        mic = [Float](repeating: 0, count: LevelMeter.length)
-        micWrite = 0
-        lock.unlock()
+    deinit {
+        micValue.deallocate()
+        micTime.deallocate()
+        remoteValue.deallocate()
+        remoteTime.deallocate()
     }
 
-    func clearRemote() {
-        lock.lock()
-        remote = [Float](repeating: 0, count: LevelMeter.length)
-        remoteWrite = 0
-        remoteAt = .distantPast
-        lock.unlock()
+    func writeMic(_ buffer: AVAudioPCMBuffer) {
+        write(buffer, values: micValue, times: micTime, cursor: micCursor)
     }
 
-    func history(remoteWanted: Bool) -> [Float] {
-        lock.lock()
-        let stale = remoteWanted && Date().timeIntervalSince(remoteAt) > 0.22
-        let source = stale ? [Float](repeating: 0, count: LevelMeter.length) : (remoteWanted ? remote : mic)
-        let write = remoteWanted ? remoteWrite : micWrite
-        lock.unlock()
-        if stale { return source }
-        var ordered = [Float]()
-        ordered.reserveCapacity(source.count)
-        var index = write
-        for _ in 0..<source.count {
-            ordered.append(source[index])
+    func writeRemote(_ buffer: AVAudioPCMBuffer) {
+        write(buffer, values: remoteValue, times: remoteTime, cursor: remoteCursor)
+    }
+
+    func hideMic() {
+        micHiddenBefore.store(Self.stamp(CACurrentMediaTime()))
+    }
+
+    func hideRemote() {
+        remoteHiddenBefore.store(Self.stamp(CACurrentMediaTime()))
+    }
+
+    fileprivate func points(
+        remote: Bool,
+        now: Double,
+        size: CGSize,
+        reach: CGFloat,
+        gain: CGFloat
+    ) -> [CGPoint] {
+        let values = remote ? remoteValue : micValue
+        let times = remote ? remoteTime : micTime
+        let cursor = remote ? remoteCursor.load() : micCursor.load()
+        let hidden = remote ? remoteHiddenBefore.load() : micHiddenBefore.load()
+        let window = 0.48
+        let tStart = now - window
+        let mid = size.height * 0.5
+        let oldest = max(0, cursor - Self.capacity)
+        var raw: [CGPoint] = []
+        raw.reserveCapacity(160)
+        var index = oldest
+        while index < cursor {
+            let slot = index & Self.mask
+            let time = times[slot]
+            if time >= tStart && Self.stamp(time) >= hidden {
+                let across = CGFloat((time - tStart) / window)
+                let bell = sin(min(1, max(0, across)) * .pi)
+                let windowed = (0.18 + 0.82 * bell) * gain
+                let sample = max(-1, min(1, CGFloat(values[slot]) * windowed))
+                raw.append(CGPoint(x: across * size.width, y: mid - sample * reach))
+            }
             index += 1
-            if index >= source.count { index = 0 }
         }
-        return ordered
+        return raw
     }
 
-    private func append(_ samples: [Float], into wave: inout [Float], write: inout Int) {
-        for sample in samples {
-            wave[write] = sample
-            write += 1
-            if write >= wave.count { write = 0 }
+    private func write(
+        _ buffer: AVAudioPCMBuffer,
+        values: UnsafeMutablePointer<Float>,
+        times: UnsafeMutablePointer<Double>,
+        cursor: AtomicWord
+    ) {
+        guard let channels = buffer.floatChannelData else { return }
+        let frames = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        let rate = buffer.format.sampleRate
+        guard frames > 1, channelCount > 0, rate > 0 else { return }
+        let used = min(channelCount, 2)
+        let buckets = min(16, max(8, frames / 48))
+        let chunk = max(1, frames / buckets)
+        let duration = Double(frames) / rate
+        let step = duration / Double(buckets)
+        var time = CACurrentMediaTime() - duration
+        let base = cursor.load()
+        var offset = 0
+        while offset < buckets {
+            let start = offset * chunk
+            let end = min(frames, start + chunk)
+            var chosen: Float = 0
+            var chosenAbs: Float = 0
+            var index = start
+            while index < end {
+                var mixed: Float = 0
+                var channel = 0
+                while channel < used {
+                    mixed += channels[channel][index]
+                    channel += 1
+                }
+                mixed /= Float(used)
+                if mixed.isFinite {
+                    let magnitude = abs(mixed)
+                    if magnitude >= chosenAbs {
+                        chosenAbs = magnitude
+                        chosen = mixed
+                    }
+                }
+                index += 1
+            }
+            let boosted = max(-1, min(1, chosen * 5.5))
+            let slot = (base + offset) & Self.mask
+            times[slot] = time
+            values[slot] = boosted
+            time += step
+            offset += 1
         }
+        cursor.store(base + buckets)
+    }
+
+    private static func stamp(_ time: Double) -> Int {
+        Int(max(0, time) * 1000)
     }
 }
 
-/// Owns the live sample history. The trace reads it on the main thread.
-@MainActor
-final class AudioLevels: ObservableObject {
-    let meter = LevelMeter()
+/// Holds the ring. It does not publish levels into SwiftUI.
+final class AudioLevels {
+    let wave = WaveRing()
 }
 
-/// Live sample history across the middle of the button. Edges stay near the baseline.
+/// Display-rate trace. The Canvas reads the ring itself.
 struct TalkLevelFill: View {
-    var levels: AudioLevels
+    var wave: WaveRing
     var transmitting: Bool
     var receiving: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: frameInterval)) { _ in
-            TalkLevelCanvas(
-                samples: levels.meter.history(remoteWanted: receiving && !transmitting),
-                live: transmitting || receiving,
-                subtler: receiving && !transmitting
-            )
+        TimelineView(.animation) { timeline in
+            Canvas { context, size in
+                WaveDraw.draw(
+                    context: &context,
+                    size: size,
+                    wave: wave,
+                    now: CACurrentMediaTime(),
+                    tick: timeline.date.timeIntervalSinceReferenceDate,
+                    transmitting: transmitting,
+                    receiving: receiving
+                )
+            }
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
-
-    private var frameInterval: Double {
-        (transmitting || receiving) ? 1.0 / 45.0 : 1.0 / 8.0
-    }
 }
 
-private struct TalkLevelCanvas: View {
-    var samples: [Float]
-    var live: Bool
-    var subtler: Bool
-
-    var body: some View {
-        Canvas { context, size in
-            TalkLevelDraw.draw(context: &context, size: size, samples: samples, live: live, subtler: subtler)
-        }
-    }
-}
-
-private enum TalkLevelDraw {
+private enum WaveDraw {
     private static let teal = Color(red: 62.0 / 255.0, green: 230.0 / 255.0, blue: 208.0 / 255.0)
+    private static let stroke = StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+    private static let glow = StrokeStyle(lineWidth: 3.5, lineCap: .round, lineJoin: .round)
 
     static func draw(
         context: inout GraphicsContext,
         size: CGSize,
-        samples: [Float],
-        live: Bool,
-        subtler: Bool
+        wave: WaveRing,
+        now: Double,
+        tick: TimeInterval,
+        transmitting: Bool,
+        receiving: Bool
     ) {
-        guard size.width > 1, size.height > 1, samples.count > 1 else { return }
+        let _ = tick
+        guard size.width > 1, size.height > 1 else { return }
         context.clip(to: Path(ellipseIn: CGRect(origin: .zero, size: size)))
         let mid = size.height * 0.5
-        let reach = size.height * (subtler ? 0.22 : 0.36)
-        let last = samples.count - 1
-        var points: [CGPoint] = []
-        var weight: [CGFloat] = []
-        points.reserveCapacity(samples.count)
-        weight.reserveCapacity(samples.count)
-        for index in samples.indices {
-            let across = CGFloat(index) / CGFloat(last)
-            let center = sin(across * .pi)
-            let window = 0.08 + 0.92 * center
-            let gain: CGFloat = subtler ? 0.58 : 1
-            let shaped = max(-1, min(1, CGFloat(samples[index]) * gain)) * window
-            let x = across * size.width
-            points.append(CGPoint(x: x, y: mid - shaped * reach))
-            weight.append(abs(shaped))
+        let live = transmitting || receiving
+        let subtler = receiving && !transmitting
+        var path = Path()
+        if live {
+            let reach = size.height * (subtler ? 0.2 : 0.34)
+            let samples = wave.points(remote: subtler, now: now, size: size, reach: reach, gain: subtler ? 0.6 : 1)
+            path = curve(samples, spike: size.height * 0.07, mid: mid, width: size.width)
         }
-        var whole = Path()
-        whole.move(to: points[0])
-        for point in points.dropFirst() {
-            whole.addLine(to: point)
+        if path.isEmpty {
+            path.move(to: CGPoint(x: 0, y: mid))
+            path.addLine(to: CGPoint(x: size.width, y: mid))
         }
-        let glow = subtler ? 0.35 : (live ? 0.75 : 0.32)
-        context.drawLayer { layer in
-            layer.addFilter(.blur(radius: 7))
-            layer.stroke(
-                whole,
-                with: .color(teal.opacity(glow)),
-                style: StrokeStyle(lineWidth: 10, lineCap: .round, lineJoin: .round)
-            )
-        }
-        let style = StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round)
-        for index in 0..<last {
-            var segment = Path()
-            segment.move(to: points[index])
-            segment.addLine(to: points[index + 1])
-            let peak = max(weight[index], weight[index + 1])
-            context.stroke(segment, with: .color(color(for: peak, live: live)), style: style)
-        }
+        context.stroke(path, with: .color(teal.opacity(live ? 0.16 : 0.1)), style: glow)
+        context.stroke(path, with: .color(teal.opacity(live ? 1 : 0.45)), style: stroke)
     }
 
-    private static func color(for peak: CGFloat, live: Bool) -> Color {
-        if !live { return teal.opacity(0.5) }
-        if peak < 0.35 { return teal }
-        let mix = min(1, (peak - 0.35) / 0.65)
-        return Color(
-            red: (62.0 / 255.0) + (0.92 - 62.0 / 255.0) * mix,
-            green: (230.0 / 255.0) + (1 - 230.0 / 255.0) * mix,
-            blue: (208.0 / 255.0) + (0.97 - 208.0 / 255.0) * mix
-        )
+    /// Catmull-Rom through ordinary samples. Steep jumps stay straight so spikes stay sharp.
+    private static func curve(_ points: [CGPoint], spike: CGFloat, mid: CGFloat, width: CGFloat) -> Path {
+        guard let first = points.first else { return Path() }
+        var path = Path()
+        path.move(to: CGPoint(x: min(first.x, 0), y: mid))
+        path.addLine(to: first)
+        let last = points.count - 1
+        for index in 0..<last {
+            let p1 = points[index]
+            let p2 = points[index + 1]
+            if abs(p1.y - p2.y) >= spike {
+                path.addLine(to: p2)
+                continue
+            }
+            let p0 = index > 0 ? points[index - 1] : p1
+            let p3 = index + 2 <= last ? points[index + 2] : p2
+            path.addCurve(
+                to: p2,
+                control1: CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6),
+                control2: CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
+            )
+        }
+        path.addLine(to: CGPoint(x: width, y: mid))
+        return path
     }
 }
 

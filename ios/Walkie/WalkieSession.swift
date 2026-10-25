@@ -150,7 +150,7 @@ final class WalkieSession: ObservableObject {
         accountUsername = defaults.string(forKey: Key.username) ?? ""
         speakerphone = defaults.object(forKey: Key.speakerphone) as? Bool ?? true
         engine.setSpeakerphone(speakerphone)
-        engine.attachLevelMeter(levels.meter)
+        engine.attachLevelMeter(levels.wave)
         engine.activateForSystemVolume()
 
         transmitter.signaling = self
