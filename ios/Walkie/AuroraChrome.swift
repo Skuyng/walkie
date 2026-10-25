@@ -671,7 +671,13 @@ extension View {
             .tint(Aurora.teal)
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: 16, style: .circular)
+                    .fill(Color.white.opacity(0.14))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .circular)
+                    .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+            }
     }
 }
