@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var listenToast = ""
     @State private var showListenToast = false
     @State private var showListenVolume = false
+    @State private var showChannelMenu = false
     @State private var listenHide: Task<Void, Never>?
     @State private var volumeHide: Task<Void, Never>?
 
@@ -63,6 +64,7 @@ struct ContentView: View {
             if !signed {
                 showMenu = false
                 hideListenVolume()
+                hideChannelMenu()
             }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -71,6 +73,7 @@ struct ContentView: View {
                 session.setCaptureWarm(false)
                 session.releaseIdleVolumeSession()
                 hideListenVolume()
+                hideChannelMenu()
             } else if phase == .active {
                 session.setCaptureWarm(true)
                 session.prepareVolumeHUD()
@@ -158,6 +161,22 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(showListenVolume)
             }
+            .overlayPreferenceValue(ChannelPillAnchorKey.self) { rect in
+                GeometryReader { proxy in
+                    if showChannelMenu && rect.width > 1 {
+                        ChannelMenuPopover(
+                            session: session,
+                            anchor: rect,
+                            bounds: proxy.size,
+                            onDismiss: hideChannelMenu,
+                            onSelect: chooseChannel
+                        )
+                        .transition(.opacity)
+                    }
+                }
+                .allowsHitTesting(showChannelMenu)
+                .animation(.spring(response: 0.34, dampingFraction: 0.86), value: showChannelMenu)
+            }
         }
     }
 
@@ -175,10 +194,12 @@ struct ContentView: View {
                 mode: radioMode,
                 transmittingLabel: session.t(.transmitting),
                 receivingLabel: session.t(.receiving),
-                hint: session.t(.opensSettings),
-                action: openMenu
+                hint: session.t(.opensChannels),
+                expanded: showChannelMenu,
+                action: toggleChannelMenu
             )
             .fixedSize(horizontal: true, vertical: false)
+            .background(channelPillAnchor)
             .frame(maxWidth: .infinity)
         }
     }
@@ -267,6 +288,33 @@ struct ContentView: View {
         scheduleVolumeHide()
     }
 
+    private func toggleChannelMenu() {
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            showChannelMenu.toggle()
+        }
+    }
+
+    private func hideChannelMenu() {
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            showChannelMenu = false
+        }
+    }
+
+    private func chooseChannel(_ id: String) {
+        if id != session.talkGroup {
+            session.selectTalk(id)
+            session.haptics.tickSelection()
+        }
+        hideChannelMenu()
+    }
+
+    private var channelPillAnchor: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(key: ChannelPillAnchorKey.self, value: proxy.frame(in: .named("talk")))
+        }
+        .allowsHitTesting(false)
+    }
+
     private func scheduleVolumeHide() {
         volumeHide?.cancel()
         volumeHide = Task {
@@ -345,6 +393,7 @@ struct ContentView: View {
 
     private func enterDarkMode() {
         hideListenVolume()
+        hideChannelMenu()
         if savedBrightness == nil {
             savedBrightness = UIScreen.main.brightness
         }
@@ -722,6 +771,229 @@ private struct PresenceFace: View {
         let trimmed = member.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.first else { return "?" }
         return String(first).uppercased()
+    }
+}
+
+private struct ChannelPillAnchorKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next.width > 0 {
+            value = next
+        }
+    }
+}
+
+private enum ChannelPresence {
+    case unknown, offline, online, talking
+}
+
+/// Glass list anchored under the channel pill. The scrim is full-screen so a tap outside closes it.
+private struct ChannelMenuPopover: View {
+    @ObservedObject var session: WalkieSession
+    var anchor: CGRect
+    var bounds: CGSize
+    var onDismiss: () -> Void
+    var onSelect: (String) -> Void
+    @State private var revealed = false
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .frame(width: bounds.width, height: bounds.height)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onDismiss)
+            VStack(spacing: 0) {
+                Color.clear
+                    .frame(height: gap)
+                    .allowsHitTesting(false)
+                menuCard
+                    .frame(width: menuWidth)
+                    .scaleEffect(revealed ? 1 : 0.96, anchor: .top)
+                    .onAppear {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                            revealed = true
+                        }
+                    }
+                Spacer(minLength: 0)
+                    .allowsHitTesting(false)
+            }
+            .frame(width: bounds.width, height: bounds.height)
+        }
+        .frame(width: bounds.width, height: bounds.height)
+    }
+
+    private var gap: CGFloat {
+        max(0, anchor.maxY + 8)
+    }
+
+    private var menuWidth: CGFloat {
+        min(320, max(220, bounds.width - 32))
+    }
+
+    private var menuHeightLimit: CGFloat {
+        let room = bounds.height - gap - 16
+        return min(420, max(140, room))
+    }
+
+    private var groupRows: [WalkieGroup] {
+        session.groups.filter { !$0.direct }
+    }
+
+    private var directRows: [WalkieGroup] {
+        session.groups.filter(\.direct)
+    }
+
+    private var menuCard: some View {
+        GlassEffectContainer(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    channelSection(session.t(.groups), rows: groupRows)
+                    channelSection(session.t(.directSection), rows: directRows)
+                    if groupRows.isEmpty && directRows.isEmpty {
+                        Text(session.t(.noGroup))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                    }
+                }
+                .padding(8)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: menuHeightLimit)
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.35), radius: 24, y: 14)
+        }
+    }
+
+    @ViewBuilder
+    private func channelSection(_ title: String, rows: [WalkieGroup]) -> some View {
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .textCase(.uppercase)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+                    .padding(.bottom, 2)
+                ForEach(rows) { group in
+                    ChannelMenuRow(session: session, group: group, selected: session.talkGroup == group.id) {
+                        onSelect(group.id)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ChannelMenuRow: View {
+    @ObservedObject var session: WalkieSession
+    let group: WalkieGroup
+    var selected: Bool
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                presenceMark
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if !detail.isEmpty {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Aurora.teal)
+                        .accessibilityHidden(true)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(detail)
+        .accessibilityAddTraits(selected ? .isSelected : AccessibilityTraits())
+    }
+
+    private var title: String {
+        let named = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !named.isEmpty { return named }
+        let handle = group.peer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !handle.isEmpty { return "@\(handle)" }
+        return group.id
+    }
+
+    private var detail: String {
+        if group.direct {
+            let named = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let handle = group.peer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !named.isEmpty && !handle.isEmpty { return "@\(handle)" }
+            return ""
+        }
+        let count = group.roster.count
+        if count == 1 { return session.t(.oneMember) }
+        if count > 1 { return session.tf(.manyMembers, "\(count)") }
+        return ""
+    }
+
+    private var presence: ChannelPresence {
+        guard session.linkState == .connected else { return .unknown }
+        let members = session.onlineMembers(in: group.id)
+        if members.contains(where: { $0.talking }) { return .talking }
+        if group.direct {
+            return session.peerIsOnline(in: group.id) ? .online : .offline
+        }
+        if members.isEmpty { return .offline }
+        return .online
+    }
+
+    private var presenceColor: Color {
+        switch presence {
+        case .talking:
+            return Aurora.teal
+        case .online:
+            return Aurora.green
+        case .offline, .unknown:
+            return Color.white.opacity(0.28)
+        }
+    }
+
+    @ViewBuilder
+    private var presenceMark: some View {
+        if presence != .unknown {
+            Circle()
+                .fill(presenceColor)
+                .frame(width: 8, height: 8)
+                .shadow(color: presence == .offline ? .clear : presenceColor.opacity(0.9), radius: 5)
+                .accessibilityHidden(true)
+        }
     }
 }
 

@@ -62,6 +62,11 @@ final class WalkieHaptics {
         onMain { self.fireVolumeTick() }
     }
 
+    /// Light tick when the talk channel changes. Talk press and release are unchanged.
+    func tickSelection() {
+        onMain { self.fireVolumeTick() }
+    }
+
     /// Volume-up and the on-screen press both land here. Fire immediately on
     /// the main thread; hop if a caller is not already there.
     private func onMain(_ work: @escaping () -> Void) {
@@ -630,6 +635,7 @@ struct TuningReadout: View {
     var transmittingLabel: String
     var receivingLabel: String
     var hint: String
+    var expanded: Bool = false
     var action: () -> Void
     @State private var settling = false
 
@@ -657,6 +663,8 @@ struct TuningReadout: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .fixedSize()
+                    .rotationEffect(.degrees(expanded ? 180 : 0))
+                    .animation(.spring(response: 0.34, dampingFraction: 0.86), value: expanded)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)

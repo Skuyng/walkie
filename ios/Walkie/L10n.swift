@@ -134,6 +134,9 @@ enum LKey {
     case cancel
     case disconnect
     case groups
+    case directSection
+    case oneMember
+    case manyMembers
     case contacts
     case quietHours
     case account
@@ -200,6 +203,7 @@ enum LKey {
     case transmitting
     case receiving
     case opensSettings
+    case opensChannels
     case roomLine
     case speakingIn
     case speakingTail
@@ -264,6 +268,9 @@ enum L10n {
         case .cancel: return english ? "Cancel" : "Avbryt"
         case .disconnect: return english ? "Disconnect" : "Koble fra"
         case .groups: return english ? "Groups" : "Grupper"
+        case .directSection: return english ? "Direct" : "Direkte"
+        case .oneMember: return english ? "1 member" : "1 medlem"
+        case .manyMembers: return english ? "%@ members" : "%@ medlemmer"
         case .contacts: return english ? "Contacts" : "Kontakter"
         case .quietHours: return english ? "Do not disturb" : "Ikke forstyrr"
         case .account: return english ? "Account" : "Konto"
@@ -330,6 +337,7 @@ enum L10n {
         case .transmitting: return english ? "Transmitting" : "Sender"
         case .receiving: return english ? "Receiving" : "Mottar"
         case .opensSettings: return english ? "Opens settings" : "Åpner innstillinger"
+        case .opensChannels: return english ? "Opens channels" : "Åpner kanaler"
         case .roomLine: return "%@: %@"
         case .speakingIn: return english ? "%@ in %@" : "%@ i %@"
         case .speakingTail: return english ? "talking" : "snakker"

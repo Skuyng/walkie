@@ -45,7 +45,7 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Invitér** — admin skriver et brukernavn. Invitasjonen vises hos den andre under Invitasjoner, med Godta og Avslå.
 - **Fjern** — admin ser knappen ved andre medlemmer og må bekrefte. Den som blir fjernet får beskjed og hører ikke gruppen lenger. Admin kan ikke fjerne seg selv. Admin sletter gruppen. Medlemmer forlater den.
 - **Lytt** — på per gruppe. Du kan lytte til flere samtidig. Av gjør at du fortsatt ser hvem som er pålogget, men ikke hører lyden.
-- **Talk / Velg** — én gruppe om gangen. Hold-for-å-snakke og volum opp sender bare dit.
+- **Talk / Velg** — én gruppe om gangen. Hold-for-å-snakke og volum opp sender bare dit. Pillen øverst åpner en glassliste under seg, med Grupper og Direkte. Trykk en rad for å bytte kanal. Trykk utenfor for å lukke. Tannhjulet åpner fortsatt Innstillinger.
 - **Pålogget** — grønn prikk ved navnet. Den som snakker utheves.
 - **Server** — `wss://walkie-bc0z.onrender.com` som standard. `https://` gjøres om til `wss://`, og `http://` til `ws://`. Tomt felt bruker standardadressen.
 - **Hold for å snakke** — lyd sendes bare mens knappen holdes inne.
