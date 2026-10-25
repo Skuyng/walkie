@@ -897,7 +897,7 @@ final class WalkieSession: ObservableObject {
     private static func validUsername(_ user: String) -> Bool {
         guard user.count >= 3, user.count <= 20 else { return false }
         return user.unicodeScalars.allSatisfy { scalar in
-            CharacterSet.username.unicodeScalars.contains(scalar)
+            CharacterSet.username.contains(scalar)
         }
     }
 
