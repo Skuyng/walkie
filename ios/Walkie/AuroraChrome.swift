@@ -234,24 +234,50 @@ final class WaveRing: @unchecked Sendable {
         let hidden = remote ? remoteHiddenBefore.load() : micHiddenBefore.load()
         let window = 0.48
         let tStart = now - window
-        let mid = size.height * 0.5
+        let midX = size.width * 0.5
+        let midY = size.height * 0.5
+        let half = midX
         let oldest = max(0, cursor - Self.capacity)
-        var raw: [CGPoint] = []
-        raw.reserveCapacity(160)
+        var aged: [(CGFloat, CGFloat)] = []
+        aged.reserveCapacity(160)
         var index = oldest
         while index < cursor {
             let slot = index & Self.mask
             let time = times[slot]
-            if time >= tStart && Self.stamp(time) >= hidden {
-                let across = CGFloat((time - tStart) / window)
-                let bell = sin(min(1, max(0, across)) * .pi)
-                let windowed = (0.18 + 0.82 * bell) * gain
-                let sample = max(-1, min(1, CGFloat(values[slot]) * windowed))
-                raw.append(CGPoint(x: across * size.width, y: mid - sample * reach))
+            let age = now - time
+            if time >= tStart && age >= 0 && Self.stamp(time) >= hidden {
+                aged.append((CGFloat(age / window), CGFloat(values[slot])))
             }
             index += 1
         }
+        var raw: [CGPoint] = []
+        raw.reserveCapacity(aged.count * 2)
+        for item in aged {
+            raw.append(placed(item.0, item.1, sign: -1, midX: midX, midY: midY, half: half, width: size.width, reach: reach, gain: gain))
+        }
+        for item in aged.reversed() {
+            raw.append(placed(item.0, item.1, sign: 1, midX: midX, midY: midY, half: half, width: size.width, reach: reach, gain: gain))
+        }
         return raw
+    }
+
+    /// Newest sample sits on the center line and the same shape leaves toward both edges.
+    private func placed(
+        _ fraction: CGFloat,
+        _ sample: CGFloat,
+        sign: CGFloat,
+        midX: CGFloat,
+        midY: CGFloat,
+        half: CGFloat,
+        width: CGFloat,
+        reach: CGFloat,
+        gain: CGFloat
+    ) -> CGPoint {
+        let x = midX + sign * min(1, max(0, fraction)) * half
+        let across = width > 0 ? x / width : 0
+        let bell = sin(min(1, max(0, across)) * .pi)
+        let shaped = max(-1, min(1, sample * (0.18 + 0.82 * bell) * gain))
+        return CGPoint(x: x, y: midY - shaped * reach)
     }
 
     private func write(
@@ -344,6 +370,7 @@ struct TalkLevelFill: View {
 private enum WaveDraw {
     private static let teal = Color(red: 62.0 / 255.0, green: 230.0 / 255.0, blue: 208.0 / 255.0)
     private static let stroke = StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
+    private static let glow = StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round)
 
     static func draw(
         context: inout GraphicsContext,
@@ -370,6 +397,10 @@ private enum WaveDraw {
             path.move(to: CGPoint(x: 0, y: mid))
             path.addLine(to: CGPoint(x: size.width, y: mid))
         }
+        context.drawLayer { layer in
+            layer.addFilter(.blur(radius: 3))
+            layer.stroke(path, with: .color(teal.opacity(0.35)), style: glow)
+        }
         context.stroke(path, with: .color(teal), style: stroke)
     }
 
@@ -383,6 +414,9 @@ private enum WaveDraw {
         for index in 0..<last {
             let p1 = points[index]
             let p2 = points[index + 1]
+            if hypot(p2.x - p1.x, p2.y - p1.y) < 0.5 {
+                continue
+            }
             if abs(p1.y - p2.y) >= spike {
                 path.addLine(to: p2)
                 continue
