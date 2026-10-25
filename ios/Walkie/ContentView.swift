@@ -9,7 +9,9 @@ struct ContentView: View {
     @State private var showMenu = false
     @State private var listenToast = ""
     @State private var showListenToast = false
+    @State private var showListenVolume = false
     @State private var listenHide: Task<Void, Never>?
+    @State private var volumeHide: Task<Void, Never>?
 
     var body: some View {
         ZStack {
@@ -42,6 +44,7 @@ struct ContentView: View {
         }
         .onDisappear {
             exitDarkMode()
+            volumeHide?.cancel()
             UIDevice.current.isProximityMonitoringEnabled = false
             session.setVolumeButtonMonitoringEnabled(false)
             session.setHeadsetTalkEnabled(false)
@@ -57,13 +60,17 @@ struct ContentView: View {
             if !connected { exitDarkMode() }
         }
         .onChange(of: session.signedIn) { _, signed in
-            if !signed { showMenu = false }
+            if !signed {
+                showMenu = false
+                hideListenVolume()
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
                 session.endTransmitting()
                 session.setCaptureWarm(false)
                 session.releaseIdleVolumeSession()
+                hideListenVolume()
             } else if phase == .active {
                 session.setCaptureWarm(true)
                 session.prepareVolumeHUD()
@@ -111,7 +118,9 @@ struct ContentView: View {
                         TalkBottomBar(
                             session: session,
                             link: linkAction,
+                            volumeOpen: showListenVolume,
                             onSpeaker: cycleListen,
+                            onVolume: toggleListenVolume,
                             onDark: enterDarkMode,
                             onLink: linkTapped
                         )
@@ -131,14 +140,23 @@ struct ContentView: View {
                     receiving: !session.isTalking && !session.talkers.isEmpty
                 )
             }
-            .overlay(alignment: .bottomLeading) {
-                VerticalListenSlider(session: session)
-                    .padding(.leading, 16)
-                    .padding(.bottom, 16)
-            }
             .overlay(alignment: .bottom) {
                 listenChrome
                     .padding(.bottom, 92)
+            }
+            .overlayPreferenceValue(VolumeButtonAnchorKey.self) { rect in
+                GeometryReader { proxy in
+                    if showListenVolume && rect.width > 1 {
+                        ListenVolumePopover(
+                            session: session,
+                            anchor: rect,
+                            bounds: proxy.size,
+                            onDismiss: hideListenVolume,
+                            onInteract: pokeListenVolume
+                        )
+                    }
+                }
+                .allowsHitTesting(showListenVolume)
             }
         }
     }
@@ -228,6 +246,36 @@ struct ContentView: View {
         }
     }
 
+    private func toggleListenVolume() {
+        if showListenVolume {
+            hideListenVolume()
+        } else {
+            showListenVolume = true
+            scheduleVolumeHide()
+        }
+    }
+
+    private func hideListenVolume() {
+        volumeHide?.cancel()
+        volumeHide = nil
+        showListenVolume = false
+    }
+
+    /// Dragging counts as interaction, so the ten-second hide starts over.
+    private func pokeListenVolume() {
+        guard showListenVolume else { return }
+        scheduleVolumeHide()
+    }
+
+    private func scheduleVolumeHide() {
+        volumeHide?.cancel()
+        volumeHide = Task {
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled else { return }
+            showListenVolume = false
+        }
+    }
+
     private func linkTapped() {
         switch linkAction {
         case .connect:
@@ -296,6 +344,7 @@ struct ContentView: View {
     }
 
     private func enterDarkMode() {
+        hideListenVolume()
         if savedBrightness == nil {
             savedBrightness = UIScreen.main.brightness
         }
@@ -679,7 +728,9 @@ private struct PresenceFace: View {
 private struct TalkBottomBar: View {
     @ObservedObject var session: WalkieSession
     var link: HomeLink
+    var volumeOpen: Bool
     var onSpeaker: () -> Void
+    var onVolume: () -> Void
     var onDark: () -> Void
     var onLink: () -> Void
 
@@ -691,6 +742,13 @@ private struct TalkBottomBar: View {
                 tint: speakerTint,
                 action: onSpeaker
             )
+            TalkIconButton(
+                systemImage: "speaker.wave.2.fill",
+                title: session.t(.incomingVolume),
+                tint: volumeOpen ? Aurora.teal : .primary,
+                action: onVolume
+            )
+            .background(volumeAnchor)
             TalkIconButton(systemImage: "moon.fill", title: session.t(.darkMode), tint: .primary, action: onDark)
             if link == .connect {
                 Button(action: onLink) {
@@ -710,6 +768,13 @@ private struct TalkBottomBar: View {
         .padding(.vertical, 8)
         .glassEffect(.regular, in: Capsule())
         .accessibilityElement(children: .contain)
+    }
+
+    private var volumeAnchor: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(key: VolumeButtonAnchorKey.self, value: proxy.frame(in: .named("talk")))
+        }
+        .allowsHitTesting(false)
     }
 
     private var speakerTint: Color {
@@ -757,28 +822,111 @@ private struct TalkBottomBar: View {
     }
 }
 
+private struct VolumeButtonAnchorKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next.width > 0 {
+            value = next
+        }
+    }
+}
+
+/// Full-screen layer so the slider's frame sits inside a parent that can hit-test it.
+/// An offset overlay on the short bottom bar drew the capsule but never received the drag.
+private struct ListenVolumePopover: View {
+    @ObservedObject var session: WalkieSession
+    var anchor: CGRect
+    var bounds: CGSize
+    var onDismiss: () -> Void
+    var onInteract: () -> Void
+
+    private static let gap: CGFloat = 10
+    private static let blockWidth: CGFloat = 64
+    private static let blockHeight: CGFloat = 172
+
+    var body: some View {
+        ZStack {
+            Color.white.opacity(0.001)
+                .frame(width: bounds.width, height: bounds.height)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onDismiss)
+            VStack(spacing: 6) {
+                Text(percentLabel)
+                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.55), radius: 3, y: 1)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onInteract)
+                VerticalListenSlider(session: session, onInteract: onInteract)
+            }
+            .frame(width: Self.blockWidth, height: Self.blockHeight)
+            .position(x: centerX, y: centerY)
+        }
+        .frame(width: bounds.width, height: bounds.height)
+    }
+
+    private var percentLabel: String {
+        "\(Int((session.listenGain * 100).rounded()))%"
+    }
+
+    private var centerX: CGFloat {
+        let half = Self.blockWidth / 2
+        let lower = half + 8
+        let upper = max(lower, bounds.width - half - 8)
+        return min(max(anchor.midX, lower), upper)
+    }
+
+    private var centerY: CGFloat {
+        let half = Self.blockHeight / 2
+        let preferred = anchor.minY - Self.gap - half
+        return max(preferred, half + 8)
+    }
+}
+
+/// Owns the step counter so a gain update does not rebuild the drag gesture.
+private final class VolumeDragActions {
+    var set: (Double) -> Void = { _ in }
+    var lastStep = -1
+
+    static let steps = 20
+
+    static func step(for gain: Double) -> Int {
+        Int((min(1, max(0, gain)) * Double(steps)).rounded())
+    }
+
+    func apply(gain: Double, session: WalkieSession, onInteract: () -> Void) {
+        session.setListenGain(gain)
+        onInteract()
+        let next = Self.step(for: session.listenGain)
+        guard next != lastStep else { return }
+        lastStep = next
+        session.haptics.tickVolume()
+    }
+}
+
 private struct VerticalListenSlider: View {
     @ObservedObject var session: WalkieSession
-    @State private var lastStep = -1
+    var onInteract: () -> Void
+    @State private var actions = VolumeDragActions()
 
     private static let trackWidth: CGFloat = 44
     private static let trackHeight: CGFloat = 140
-    private static let steps = 20
-    /// #3EE6D0
-    private static let level = Color(red: 62.0 / 255.0, green: 230.0 / 255.0, blue: 208.0 / 255.0)
 
     var body: some View {
-        GeometryReader { geo in
-            levelTrack(in: geo.size)
-                .contentShape(Capsule())
-                .gesture(drag(in: geo.size))
-                .overlay(alignment: .bottom) {
-                    Image(systemName: "speaker.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .padding(.bottom, 10)
-                        .allowsHitTesting(false)
-                }
+        ZStack {
+            VolumeLevelTrack(
+                fraction: session.listenGain,
+                width: Self.trackWidth,
+                height: Self.trackHeight
+            )
+            VolumeDragTarget(
+                width: Self.trackWidth,
+                height: Self.trackHeight,
+                actions: actions
+            )
+            .equatable()
         }
         .frame(width: Self.trackWidth, height: Self.trackHeight)
         .accessibilityElement()
@@ -786,54 +934,82 @@ private struct VerticalListenSlider: View {
         .accessibilityValue(percentLabel)
         .accessibilityAdjustableAction { direction in
             let delta = direction == .increment ? 0.05 : -0.05
-            apply(session.listenGain + delta)
+            actions.apply(session.listenGain + delta, session: session, onInteract: onInteract)
         }
-        .onAppear {
-            lastStep = step(for: session.listenGain)
-        }
+        .onAppear(perform: bind)
     }
 
     private var percentLabel: String {
         "\(Int((session.listenGain * 100).rounded()))%"
     }
 
-    private func levelTrack(in size: CGSize) -> some View {
-        let fraction = CGFloat(min(1, max(0, session.listenGain)))
-        let inner = max(0, size.height - 8)
-        let filled = inner * fraction
-        let nub: CGFloat = fraction > 0 ? 10 : 0
-        return Capsule()
-            .fill(Color.white.opacity(0.06))
-            .frame(width: size.width, height: size.height)
-            .glassEffect(.regular, in: Capsule())
-            .overlay(alignment: .bottom) {
-                Capsule()
-                    .fill(Self.level)
-                    .frame(width: max(0, size.width - 8), height: max(nub, filled))
-                    .padding(.bottom, 4)
-            }
-            .clipShape(Capsule())
+    private func bind() {
+        actions.lastStep = VolumeDragActions.step(for: session.listenGain)
+        let session = session
+        let onInteract = onInteract
+        actions.set = { [actions] gain in
+            actions.apply(gain, session: session, onInteract: onInteract)
+        }
+    }
+}
+
+private struct VolumeLevelTrack: View {
+    var fraction: Double
+    var width: CGFloat
+    var height: CGFloat
+
+    /// #3EE6D0
+    private static let level = Color(red: 62.0 / 255.0, green: 230.0 / 255.0, blue: 208.0 / 255.0)
+
+    var body: some View {
+        GlassEffectContainer(spacing: 0) {
+            Capsule()
+                .fill(Color.white.opacity(0.06))
+                .frame(width: width, height: height)
+                .glassEffect(.regular, in: Capsule())
+                .overlay(alignment: .bottom) {
+                    Capsule()
+                        .fill(Self.level)
+                        .frame(width: max(0, width - 8), height: filledHeight)
+                        .padding(.bottom, 4)
+                }
+                .clipShape(Capsule())
+        }
+        .frame(width: width, height: height)
+        .allowsHitTesting(false)
     }
 
-    private func drag(in size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                let span = max(size.height, 1)
-                let y = min(max(0, value.location.y), span)
-                apply(1 - Double(y / span))
-            }
+    private var filledHeight: CGFloat {
+        let clamped = CGFloat(min(1, max(0, fraction)))
+        let inner = max(0, height - 8)
+        let filled = inner * clamped
+        let nub: CGFloat = clamped > 0 ? 10 : 0
+        return max(nub, filled)
+    }
+}
+
+/// Stable hit target. Equality ignores the level so publishing gain does not cancel the drag.
+private struct VolumeDragTarget: View, Equatable {
+    var width: CGFloat
+    var height: CGFloat
+    var actions: VolumeDragActions
+
+    static func == (lhs: VolumeDragTarget, rhs: VolumeDragTarget) -> Bool {
+        lhs.width == rhs.width && lhs.height == rhs.height
     }
 
-    private func apply(_ gain: Double) {
-        session.setListenGain(gain)
-        let next = step(for: session.listenGain)
-        guard next != lastStep else { return }
-        lastStep = next
-        session.haptics.tickVolume()
-    }
-
-    private func step(for gain: Double) -> Int {
-        Int((min(1, max(0, gain)) * Double(Self.steps)).rounded())
+    var body: some View {
+        Color.clear
+            .frame(width: width, height: height)
+            .contentShape(Capsule())
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let span = max(height, 1)
+                        let y = min(max(0, value.location.y), span)
+                        actions.set(1 - Double(y / span))
+                    }
+            )
     }
 }
 
