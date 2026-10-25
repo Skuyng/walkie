@@ -37,7 +37,7 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Blokker** — ved et annet medlem. Lyden deres spilles ikke av hos deg. Valget lagres på serveren.
 - **Rapporter** — ved et annet medlem, etter bekreftelse. Rapporten lagres på serveren.
 - **Slett konto** — under Konto i Innstillinger, etter bekreftelse. Brukeren, øktene og medlemskapene slettes. En gruppe du eier alene slettes. Ellers får det eldste andre medlemmet admin.
-- **Direkte** — under Kontakter i Innstillinger. Skriv et brukernavn og trykk **Be om kontakt**. Den andre godtar eller avslår. Kanalen viser den andres navn og en prikk når de er pålogget. Lytt og snakk som i en gruppe. **Avslutt** fjerner kanalen for begge. En blokkert bruker kan ikke kontaktes, og lyden deres spilles ikke av.
+- **Direkte** — under Kontakter i Innstillinger. Skriv et brukernavn og trykk **Søk bruker**. Den andre godtar eller avslår. Kanalen viser den andres navn og en prikk når de er pålogget. Lytt og snakk som i en gruppe. **Avslutt** fjerner kanalen for begge. En blokkert bruker kan ikke kontaktes, og lyden deres spilles ikke av.
 - **Opprett gruppe** — du blir admin. Store og små bokstaver er samme gruppe. Valgfritt **Passord** låser gruppen. Hashen lagres på serveren.
 - **Be om å bli med** — uten passord. Admin godkjenner eller avslår. Har du en invitasjon, godtar du den i stedet.
 - **Bli med** — når du skriver gruppepassordet, blir du medlem med en gang. Feil passord vises som «Feil passord». En lås vises på grupper som har passord.

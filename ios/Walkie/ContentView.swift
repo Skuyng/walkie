@@ -118,17 +118,18 @@ struct ContentView: View {
     }
 
     private var homeTopBar: some View {
-        HStack(spacing: 8) {
-            Text("Walkie")
-                .font(.title3.weight(.semibold))
-                .lineLimit(1)
-                .layoutPriority(1)
-            Spacer(minLength: 8)
+        ZStack {
             TuningReadout(code: talkCode, name: channelName, mode: radioMode, action: openMenu)
-                .layoutPriority(-1)
-            profileButton
-                .layoutPriority(1)
+                .fixedSize(horizontal: true, vertical: false)
+            HStack(spacing: 8) {
+                Text("Walkie")
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                profileButton
+            }
         }
+        .frame(maxWidth: .infinity)
         .frame(minHeight: 48)
     }
 
@@ -967,18 +968,10 @@ private struct GroupEditor: View {
                 .textContentType(.password)
                 .glassFieldChrome()
             HStack(spacing: 8) {
-                Button(action: createTapped) {
-                    Text("Opprett gruppe")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.glassProminent)
-                .tint(Aurora.teal)
-                Button(action: joinTapped) {
-                    Text(joinTitle)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.glass)
+                CapsuleChoice(title: "Opprett gruppe", prominent: true, height: 48, expands: true, action: createTapped)
+                CapsuleChoice(title: joinTitle, prominent: false, height: 48, expands: true, action: joinTapped)
             }
+            .frame(maxWidth: .infinity)
             GroupList(session: session)
         }
     }
@@ -1054,21 +1047,70 @@ private struct InviteRow: View {
     }
 }
 
+private struct FieldHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct CapsuleChoice: View {
+    var title: String
+    var prominent: Bool
+    var height: CGFloat
+    var expands: Bool
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .padding(.horizontal, expands ? 8 : 16)
+                .frame(maxWidth: expands ? .infinity : nil)
+                .frame(height: height)
+                .background { Capsule().fill(fill) }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(prominent ? Color.black : Color.primary)
+    }
+
+    private var fill: Color {
+        prominent ? Aurora.teal : Color.white.opacity(0.14)
+    }
+}
+
 private struct DirectSection: View {
     @ObservedObject var session: WalkieSession
     @State private var username = ""
+    @State private var fieldHeight: CGFloat = 52
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
                 TextField("Brukernavn", text: $username)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.send)
                     .onSubmit(send)
                     .glassFieldChrome()
-                Button("Be om kontakt", action: send)
-                    .buttonStyle(.glass)
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: FieldHeightKey.self, value: proxy.size.height)
+                        }
+                    }
+                CapsuleChoice(
+                    title: "Søk bruker",
+                    prominent: false,
+                    height: fieldHeight,
+                    expands: false,
+                    action: send
+                )
+            }
+            .onPreferenceChange(FieldHeightKey.self) { height in
+                if height > 0 { fieldHeight = height }
             }
             ForEach(session.directRequests) { request in
                 DirectRequestRow(session: session, request: request)
