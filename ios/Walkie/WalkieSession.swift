@@ -286,12 +286,18 @@ final class WalkieSession: ObservableObject {
     }
 
     @discardableResult
-    func createGroup(named rawName: String) -> Bool {
+    func createGroup(named rawName: String, password rawPassword: String) -> Bool {
         let label = Self.clip(rawName, limit: 30)
         let id = label.lowercased()
+        let secret = String(rawPassword.prefix(80))
         guard !id.isEmpty else {
             suggestsSettings = false
             errorMessage = "Skriv et gruppenavn."
+            return false
+        }
+        if !secret.isEmpty && secret.count < 4 {
+            suggestsSettings = false
+            errorMessage = "Passordet må ha minst 4 tegn."
             return false
         }
         guard signedIn, socketOpen else {
@@ -300,7 +306,7 @@ final class WalkieSession: ObservableObject {
             return false
         }
         preferTalk = id
-        socket.sendCreateGroup(name: label)
+        socket.sendCreateGroup(name: label, password: secret)
         return true
     }
 
@@ -318,6 +324,46 @@ final class WalkieSession: ObservableObject {
             return false
         }
         socket.sendRequestJoin(name: label)
+        return true
+    }
+
+    @discardableResult
+    func joinWithPassword(named rawName: String, password rawPassword: String) -> Bool {
+        let label = Self.clip(rawName, limit: 30)
+        let secret = String(rawPassword.prefix(80))
+        guard !label.isEmpty else {
+            suggestsSettings = false
+            errorMessage = "Skriv et gruppenavn."
+            return false
+        }
+        guard secret.count >= 4 else {
+            suggestsSettings = false
+            errorMessage = "Passordet må ha minst 4 tegn."
+            return false
+        }
+        guard signedIn, socketOpen else {
+            suggestsSettings = false
+            errorMessage = "Logg inn"
+            return false
+        }
+        socket.sendJoinWithPassword(name: label, password: secret)
+        return true
+    }
+
+    @discardableResult
+    func setGroupPassword(room: String, password rawPassword: String) -> Bool {
+        let secret = String(rawPassword.prefix(80))
+        if !secret.isEmpty && secret.count < 4 {
+            suggestsSettings = false
+            errorMessage = "Passordet må ha minst 4 tegn."
+            return false
+        }
+        guard signedIn, socketOpen else {
+            suggestsSettings = false
+            errorMessage = "Logg inn"
+            return false
+        }
+        socket.sendSetPassword(room: room, password: secret)
         return true
     }
 
@@ -770,6 +816,7 @@ final class WalkieSession: ObservableObject {
                     id: item.id,
                     name: item.name,
                     listen: listen,
+                    locked: item.locked,
                     admin: item.admin,
                     roster: item.members
                 )
@@ -965,10 +1012,11 @@ struct ServerGroup: Decodable, Equatable {
     var id: String
     var name: String
     var admin: Bool
+    var locked: Bool
     var members: [AccountMember]
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, admin, members
+        case id, name, admin, locked, members
     }
 
     init(from decoder: Decoder) throws {
@@ -976,6 +1024,7 @@ struct ServerGroup: Decodable, Equatable {
         id = try container.decode(String.self, forKey: .id)
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
         admin = try container.decodeIfPresent(Bool.self, forKey: .admin) ?? false
+        locked = try container.decodeIfPresent(Bool.self, forKey: .locked) ?? false
         members = try container.decodeIfPresent([AccountMember].self, forKey: .members) ?? []
     }
 }

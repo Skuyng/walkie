@@ -168,6 +168,57 @@ async function startServer() {
   await new Promise((resolve) => setTimeout(resolve, 250));
   if (bob.inbox.slice(after).some((entry) => entry.bin)) throw new Error('removed member still received audio');
 
+  const passAt = ada.inbox.length;
+  send(ada, { t: 'setPassword', room: 'familie', password: 'hemmelig' });
+  await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.id === 'familie' && group.locked === true);
+    } catch { return false; }
+  }, 4000, passAt);
+  const askAt = ada.inbox.length;
+  send(bob, { t: 'requestJoin', name: 'Familie' });
+  const asked = jsonText(await waitFor(ada.inbox, (entry) => !entry.bin && entry.text.includes('"requests"') && entry.text.includes('bob'), 4000, askAt));
+  if (!asked.requests.some((request) => request.username === 'bob' && request.room === 'familie')) throw new Error('locked group rejected a request');
+  send(ada, { t: 'requestReply', room: 'familie', username: 'bob', accept: false });
+  const wrongAt = bob.inbox.length;
+  send(bob, { t: 'joinWithPassword', name: 'Familie', password: 'feil' });
+  const wrong = jsonText(await waitFor(bob.inbox, (entry) => !entry.bin && entry.text.includes('Feil passord'), 4000, wrongAt));
+  if (!String(wrong.error || '').includes('Feil passord')) throw new Error('wrong password was accepted');
+  const joinAt = bob.inbox.length;
+  send(bob, { t: 'joinWithPassword', name: 'Familie', password: 'hemmelig' });
+  await waitFor(bob.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.id === 'familie' && group.locked === true);
+    } catch { return false; }
+  }, 4000, joinAt);
+  send(bob, { t: 'subscribe', talk: 'familie', muted: [] });
+  const hearAt = bob.inbox.length;
+  ada.ws.send(frame);
+  const rejoined = await waitFor(bob.inbox, (entry) => entry.bin, 3000, hearAt);
+  if (!rejoined.data.equals(frame)) throw new Error('password member missed audio');
+  const clearAt = ada.inbox.length;
+  send(ada, { t: 'setPassword', room: 'familie', password: '' });
+  await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.id === 'familie' && group.locked === false);
+    } catch { return false; }
+  }, 4000, clearAt);
+  const jobAt = ada.inbox.length;
+  send(ada, { t: 'createGroup', name: 'Jobb', password: 'jobbpass' });
+  await waitFor(ada.inbox, (entry) => {
+    if (entry.bin) return false;
+    try {
+      const message = JSON.parse(entry.text);
+      return message.t === 'inbox' && (message.groups || []).some((group) => group.id === 'jobb' && group.locked === true && group.admin);
+    } catch { return false; }
+  }, 4000, jobAt);
+
   const token = adaSession.token;
   ada.ws.close();
   bob.ws.close();
@@ -181,6 +232,7 @@ async function startServer() {
   if (resumed.username !== 'ada') throw new Error('resume failed');
   const still = jsonText(await waitFor(again.inbox, (entry) => !entry.bin && entry.text.includes('"inbox"')));
   if (!still.groups.some((group) => group.id === 'familie' && group.admin)) throw new Error('group missing after restart');
+  if (!still.groups.some((group) => group.id === 'jobb' && group.locked === true)) throw new Error('password missing after restart');
 
   console.log('accounts ok', versionJson.store);
   again.ws.close();

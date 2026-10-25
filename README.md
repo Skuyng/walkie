@@ -17,7 +17,7 @@ Render sletter gratis disk ved omstart. Opprett en **Render Postgres** (gratis) 
 
 Uten `DATABASE_URL` lagres brukere og grupper i `data/walkie.json`. Den filen forsvinner når Render starter disken på nytt.
 
-Konto: unikt brukernavn, visningsnavn og passord (scrypt på serveren). Økten er et token. Den som oppretter en gruppe er admin og kan invitere på brukernavn, godkjenne forespørsler og fjerne medlemmer. Bare medlemmer får tilstedeværelse og lyd. Gruppepassord er erstattet av medlemskap.
+Konto: unikt brukernavn, visningsnavn og passord (scrypt på serveren). Økten er et token. Den som oppretter en gruppe er admin og kan invitere på brukernavn, godkjenne forespørsler og fjerne medlemmer. Bare medlemmer får tilstedeværelse og lyd. Et valgfritt gruppepassord (scrypt) lar den som kjenner navn og passord bli medlem med en gang. Uten passord brukes invitasjon eller forespørsel. Admin kan endre eller fjerne passordet.
 
 ## iPhone
 

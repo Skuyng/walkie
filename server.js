@@ -242,7 +242,12 @@ async function createGroup(ws, message) {
     sendError(ws, '', 'Skriv et gruppenavn.');
     return;
   }
-  await store.createGroup(label, room, ws.user.id);
+  const password = normPassword(message.password);
+  if (password && password.length < 4) {
+    sendError(ws, '', 'Passordet må ha minst 4 tegn.');
+    return;
+  }
+  await store.createGroup(label, room, ws.user.id, password);
   await syncAll([room]);
 }
 
@@ -273,6 +278,33 @@ async function requestJoin(ws, message) {
     return;
   }
   await store.requestJoin(ws.user.id, room);
+  await syncAll([room]);
+}
+
+async function joinWithPassword(ws, message) {
+  if (!requireUser(ws)) return;
+  const room = normRoom(message.name || message.room);
+  const password = normPassword(message.password);
+  if (!room) {
+    sendError(ws, '', 'Skriv et gruppenavn.');
+    return;
+  }
+  if (!password) {
+    sendError(ws, room, 'Skriv passordet.');
+    return;
+  }
+  await store.joinWithPassword(ws.user.id, room, password);
+  await syncAll([room]);
+}
+
+async function setPassword(ws, message) {
+  if (!requireUser(ws)) return;
+  const room = normRoom(message.room);
+  if (!room) {
+    sendError(ws, '', 'Skriv et gruppenavn.');
+    return;
+  }
+  await store.setGroupPassword(ws.user.id, room, normPassword(message.password));
   await syncAll([room]);
 }
 
@@ -380,6 +412,8 @@ async function handleMessage(ws, message) {
   if (message.t === 'invite') return invite(ws, message);
   if (message.t === 'inviteReply') return inviteReply(ws, message);
   if (message.t === 'requestJoin') return requestJoin(ws, message);
+  if (message.t === 'joinWithPassword') return joinWithPassword(ws, message);
+  if (message.t === 'setPassword') return setPassword(ws, message);
   if (message.t === 'requestReply') return requestReply(ws, message);
   if (message.t === 'removeMember') return removeMember(ws, message);
   if (message.t === 'leave') return leave(ws, message);

@@ -29,6 +29,7 @@ label.chk{display:flex;align-items:center;gap:6px}
 <div id="home" style="display:none"><h1>📻 Walkie-Talkie</h1>
 <p id="whoami" class="hint"></p>
 <input id="gname" placeholder="Gruppenavn (f.eks. Familie)">
+<input id="gpass" type="password" placeholder="Gruppepassord (valgfritt)">
 <div class="row"><button id="create" type="button">Opprett gruppe</button><button id="ask" type="button">Be om å bli med</button></div>
 <div id="invites"></div>
 <div id="groups"></div>
@@ -94,7 +95,7 @@ function drawGroup(g){
   }).join('');
   const people=online?(problem+(rows||(problem?'':'<div class="person">Ingen pålogget</div>'))):problem;
   const mic=g.id===talk?'Snakk':'Velg';
-  const title=escapeHtml(g.name)+(g.admin?' · admin':'');
+  const title=escapeHtml(g.name)+(g.locked?' 🔒':'')+(g.admin?' · admin':'');
   let admin='';
   if(g.admin){
     const reqs=(requests||[]).filter(item=>item.room===g.id).map(item=>'<div class="tools"><span>'+escapeHtml(item.displayName||item.username)+'</span><button data-act="yesreq" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(item.username)+'">Godta</button><button data-act="noreq" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(item.username)+'">Avslå</button></div>').join('');
@@ -103,7 +104,8 @@ function drawGroup(g){
       const remove=member.username!==username&&member.role!=='admin'?'<button data-act="kick" data-id="'+escapeHtml(g.id)+'" data-user="'+escapeHtml(member.username)+'">Fjern</button>':'';
       return '<div class="person">'+line+remove+'</div>';
     }).join('');
-    admin='<div class="tools"><input data-invite="'+escapeHtml(g.id)+'" placeholder="Brukernavn"><button data-act="invite" data-id="'+escapeHtml(g.id)+'">Invitér</button></div>'+reqs+roster;
+    const clearPass=g.locked?'<button data-act="clearpass" data-id="'+escapeHtml(g.id)+'">Fjern passord</button>':'';
+    admin='<div class="tools"><input data-pass="'+escapeHtml(g.id)+'" type="password" placeholder="Nytt passord"><button data-act="setpass" data-id="'+escapeHtml(g.id)+'">Lagre passord</button>'+clearPass+'</div><div class="tools"><input data-invite="'+escapeHtml(g.id)+'" placeholder="Brukernavn"><button data-act="invite" data-id="'+escapeHtml(g.id)+'">Invitér</button></div>'+reqs+roster;
   }
   const drop=g.admin?'Slett':'Forlat';
   return '<div class="group"><h3>'+title+'</h3><div class="tools"><button data-act="talk" data-id="'+escapeHtml(g.id)+'">'+mic+'</button><label class="chk"><input data-act="listen" data-id="'+escapeHtml(g.id)+'" type="checkbox"'+(g.listen?' checked':'')+'> Lytt</label><button data-act="drop" data-id="'+escapeHtml(g.id)+'">'+drop+'</button></div>'+admin+people+'</div>';
@@ -136,6 +138,13 @@ function onTool(e){
   if(act==='yesinv'||act==='noinv')send({t:'inviteReply',room:id,accept:act==='yesinv'});
   if(act==='yesreq'||act==='noreq')send({t:'requestReply',room:id,username:user,accept:act==='yesreq'});
   if(act==='kick')send({t:'removeMember',room:id,username:user});
+  if(act==='setpass'||act==='clearpass'){
+    const field=document.querySelector('[data-pass="'+CSS.escape(id)+'"]');
+    const secret=act==='clearpass'?'':String(field?field.value:'').slice(0,80);
+    if(act==='setpass'&&secret.length<4)return alert('Passordet må ha minst 4 tegn.');
+    send({t:'setPassword',room:id,password:secret});
+    if(field)field.value='';
+  }
   render();
 }
 function applyInbox(message){
@@ -143,7 +152,7 @@ function applyInbox(message){
   groups=(message.groups||[]).map(item=>{
     const old=previous.find(g=>g.id===item.id);
     const listen=old?!!old.listen:listenMap[item.id]!==false;
-    return {id:item.id,name:item.name||item.id,admin:!!item.admin,listen,roster:item.members||[]};
+    return {id:item.id,name:item.name||item.id,admin:!!item.admin,locked:!!item.locked,listen,roster:item.members||[]};
   });
   invites=message.invites||[];
   requests=message.requests||[];
@@ -241,18 +250,30 @@ function beginAuth(kind){
 }
 $('signup').onclick=()=>beginAuth('signup');
 $('login').onclick=()=>beginAuth('login');
+function groupPassword(){return String($('gpass').value||'').slice(0,80)}
+$('gpass').addEventListener('input',()=>{$('ask').textContent=$('gpass').value?'Bli med':'Be om å bli med'});
 $('create').onclick=()=>{
   const label=String($('gname').value||'').trim().slice(0,30);
+  const password=groupPassword();
   if(!label)return alert('Skriv et gruppenavn.');
+  if(password&&password.length<4)return alert('Passordet må ha minst 4 tegn.');
   prefer=roomId(label);
-  send({t:'createGroup',name:label});
-  $('gname').value='';
+  const message={t:'createGroup',name:label};
+  if(password)message.password=password;
+  send(message);
+  $('gname').value='';$('gpass').value='';
+  $('ask').textContent='Be om å bli med';
 };
 $('ask').onclick=()=>{
   const label=String($('gname').value||'').trim().slice(0,30);
+  const password=groupPassword();
   if(!label)return alert('Skriv et gruppenavn.');
-  send({t:'requestJoin',name:label});
-  $('gname').value='';
+  if(password){
+    if(password.length<4)return alert('Passordet må ha minst 4 tegn.');
+    send({t:'joinWithPassword',name:label,password});
+  }else send({t:'requestJoin',name:label});
+  $('gname').value='';$('gpass').value='';
+  $('ask').textContent='Be om å bli med';
 };
 function logout(){
   send({t:'logout'});

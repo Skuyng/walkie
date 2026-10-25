@@ -30,6 +30,17 @@ function publicUser(user) {
   return { id: user.id, username: user.username, displayName: user.displayName };
 }
 
+function optionalSecret(password) {
+  const value = password == null ? '' : String(password).slice(0, 80);
+  if (!value) return null;
+  if (value.length < 4) throw new StoreError('Passordet må ha minst 4 tegn.');
+  return hashSecret(value);
+}
+
+function isLocked(group) {
+  return !!(group && group.salt && group.hash);
+}
+
 class JsonStore {
   constructor(file) {
     this.kind = 'json';
@@ -109,12 +120,18 @@ class JsonStore {
     });
   }
 
-  createGroup(name, roomId, ownerId) {
+  createGroup(name, roomId, ownerId, password) {
     return this.enqueue(async () => {
       if (this.data.groups.some((group) => group.id === roomId)) {
         throw new StoreError('Gruppen finnes allerede. Be om å bli med.');
       }
-      this.data.groups.push({ id: roomId, name, ownerId });
+      const secret = optionalSecret(password);
+      const group = { id: roomId, name, ownerId };
+      if (secret) {
+        group.salt = secret.salt;
+        group.hash = secret.hash;
+      }
+      this.data.groups.push(group);
       this.data.members.push({ groupId: roomId, userId: ownerId, role: 'admin' });
       this.save();
     });
@@ -131,6 +148,7 @@ class JsonStore {
         id: member.groupId,
         name: group ? group.name : member.groupId,
         admin: member.role === 'admin',
+        locked: isLocked(group),
         members: this.rosterSync(member.groupId)
       };
     });
@@ -221,6 +239,39 @@ class JsonStore {
     });
   }
 
+  joinWithPassword(userId, groupId, password) {
+    return this.enqueue(async () => {
+      const group = this.data.groups.find((item) => item.id === groupId);
+      if (!group) throw new StoreError('Fant ikke gruppen');
+      if (this.data.members.some((member) => member.groupId === groupId && member.userId === userId)) {
+        throw new StoreError('Allerede medlem');
+      }
+      if (!isLocked(group)) throw new StoreError('Gruppen har ikke passord. Be om å bli med.');
+      if (!secretMatches(password, group)) throw new StoreError('Feil passord');
+      this.data.invites = this.data.invites.filter((invite) => !(invite.groupId === groupId && invite.userId === userId));
+      this.data.requests = this.data.requests.filter((request) => !(request.groupId === groupId && request.userId === userId));
+      this.data.members.push({ groupId, userId, role: 'member' });
+      this.save();
+    });
+  }
+
+  setGroupPassword(adminId, groupId, password) {
+    return this.enqueue(async () => {
+      this.requireAdminSync(adminId, groupId);
+      const group = this.data.groups.find((item) => item.id === groupId);
+      if (!group) throw new StoreError('Fant ikke gruppen');
+      const secret = optionalSecret(password);
+      if (secret) {
+        group.salt = secret.salt;
+        group.hash = secret.hash;
+      } else {
+        delete group.salt;
+        delete group.hash;
+      }
+      this.save();
+    });
+  }
+
   replyRequest(adminId, groupId, username, accept) {
     return this.enqueue(async () => {
       this.requireAdminSync(adminId, groupId);
@@ -298,8 +349,12 @@ class PgStore {
       CREATE TABLE IF NOT EXISTS groups (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        owner_id TEXT NOT NULL REFERENCES users(id)
+        owner_id TEXT NOT NULL REFERENCES users(id),
+        salt TEXT,
+        hash TEXT
       );
+      ALTER TABLE groups ADD COLUMN IF NOT EXISTS salt TEXT;
+      ALTER TABLE groups ADD COLUMN IF NOT EXISTS hash TEXT;
       CREATE TABLE IF NOT EXISTS members (
         group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
         user_id TEXT NOT NULL REFERENCES users(id),
@@ -364,11 +419,15 @@ class PgStore {
     await this.pool.query('DELETE FROM sessions WHERE token_hash = $1', [tokenHash(token || '')]);
   }
 
-  async createGroup(name, roomId, ownerId) {
+  async createGroup(name, roomId, ownerId, password) {
+    const secret = optionalSecret(password);
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('INSERT INTO groups (id, name, owner_id) VALUES ($1, $2, $3)', [roomId, name, ownerId]);
+      await client.query(
+        'INSERT INTO groups (id, name, owner_id, salt, hash) VALUES ($1, $2, $3, $4, $5)',
+        [roomId, name, ownerId, secret ? secret.salt : null, secret ? secret.hash : null]
+      );
       await client.query('INSERT INTO members (group_id, user_id, role) VALUES ($1, $2, $3)', [roomId, ownerId, 'admin']);
       await client.query('COMMIT');
     } catch (error) {
@@ -382,7 +441,7 @@ class PgStore {
 
   async groupsFor(userId) {
     const result = await this.pool.query(
-      `SELECT g.id, g.name, m.role
+      `SELECT g.id, g.name, g.salt, g.hash, m.role
        FROM members m JOIN groups g ON g.id = m.group_id
        WHERE m.user_id = $1`,
       [userId]
@@ -393,6 +452,7 @@ class PgStore {
         id: row.id,
         name: row.name,
         admin: row.role === 'admin',
+        locked: !!(row.salt && row.hash),
         members: await this.roster(row.id)
       });
     }
@@ -491,6 +551,32 @@ class PgStore {
       'INSERT INTO requests (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
       [groupId, userId]
     );
+  }
+
+  async joinWithPassword(userId, groupId, password) {
+    const group = await this.pool.query('SELECT salt, hash FROM groups WHERE id = $1', [groupId]);
+    if (!group.rowCount) throw new StoreError('Fant ikke gruppen');
+    const member = await this.pool.query('SELECT 1 FROM members WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+    if (member.rowCount) throw new StoreError('Allerede medlem');
+    const row = group.rows[0];
+    if (!row.salt || !row.hash) throw new StoreError('Gruppen har ikke passord. Be om å bli med.');
+    if (!secretMatches(password, { salt: row.salt, hash: row.hash })) throw new StoreError('Feil passord');
+    await this.pool.query('DELETE FROM invites WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+    await this.pool.query('DELETE FROM requests WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+    await this.pool.query(
+      `INSERT INTO members (group_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING`,
+      [groupId, userId]
+    );
+  }
+
+  async setGroupPassword(adminId, groupId, password) {
+    await this.requireAdmin(adminId, groupId);
+    const secret = optionalSecret(password);
+    if (!secret) {
+      await this.pool.query('UPDATE groups SET salt = NULL, hash = NULL WHERE id = $1', [groupId]);
+      return;
+    }
+    await this.pool.query('UPDATE groups SET salt = $2, hash = $3 WHERE id = $1', [groupId, secret.salt, secret.hash]);
   }
 
   async replyRequest(adminId, groupId, username, accept) {

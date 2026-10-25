@@ -33,8 +33,10 @@ En gratis profil varer i 7 dager. Når appen slutter å starte, kjør den fra Xc
 - **Visningsnavn** — det andre ser (maks 30 tegn).
 - **Passord** — minst 4 tegn. Serveren lagrer en scrypt-hash, ikke passordet.
 - **Logg ut** — i Grupper-arket. Tokenet slettes fra Keychain.
-- **Opprett gruppe** — du blir admin. Store og små bokstaver er samme gruppe.
-- **Be om å bli med** — admin godkjenner eller avslår. Har du en invitasjon, godtar du den i stedet.
+- **Opprett gruppe** — du blir admin. Store og små bokstaver er samme gruppe. Valgfritt **Passord** låser gruppen. Hashen lagres på serveren.
+- **Be om å bli med** — uten passord. Admin godkjenner eller avslår. Har du en invitasjon, godtar du den i stedet.
+- **Bli med** — når du skriver gruppepassordet, blir du medlem med en gang. Feil passord vises som «Feil passord». En lås vises på grupper som har passord.
+- **Lagre passord / Fjern passord** — admin bytter eller fjerner gruppepassordet.
 - **Invitér** — admin skriver et brukernavn. Invitasjonen vises hos den andre under Invitasjoner, med Godta og Avslå.
 - **Fjern** — admin kan fjerne andre medlemmer. Admin sletter gruppen. Medlemmer forlater den.
 - **Lytt** — på per gruppe. Du kan lytte til flere samtidig. Av gjør at du fortsatt ser hvem som er pålogget, men ikke hører lyden.
@@ -56,7 +58,8 @@ Tekst (JSON):
 - til serveren: `{"t":"signup","username":"…","name":"…","password":"…"}`, `{"t":"login","username":"…","password":"…"}` eller `{"t":"resume","token":"…"}`
 - fra serveren: `{"t":"session","token":"…","username":"…","name":"…"}` og deretter `{"t":"inbox","groups":[…],"invites":[…],"requests":[…]}`
 - til serveren: `{"t":"subscribe","talk":"…","muted":["…"]}` — `muted` er grupper du er medlem av, men ikke lytter til
-- til serveren: `{"t":"createGroup"}`, `{"t":"invite"}`, `{"t":"inviteReply"}`, `{"t":"requestJoin"}`, `{"t":"requestReply"}`, `{"t":"removeMember"}`, `{"t":"leave"}`, `{"t":"deleteGroup"}`
+- til serveren: `{"t":"createGroup","name":"…","password":"…"}` (passord kan utelates), `{"t":"joinWithPassword","name":"…","password":"…"}`, `{"t":"setPassword","room":"…","password":"…"}` (tomt passord fjerner låsen), `{"t":"invite"}`, `{"t":"inviteReply"}`, `{"t":"requestJoin"}`, `{"t":"requestReply"}`, `{"t":"removeMember"}`, `{"t":"leave"}`, `{"t":"deleteGroup"}`
+- fra serveren, i `inbox.groups`: `locked` er sant når gruppen har passord. Hashen sendes ikke ut.
 - til serveren: `{"t":"start","room":"…"}` og `{"t":"stop","room":"…"}`
 - fra serveren: `{"t":"users","room":"…","users":["…"],"members":[{"id":"…","name":"…"}],"self":"…"}` bare til medlemmer. `members` er én rad per tilkobling, så to med samme navn vises begge. `users` er fortsatt navnelisten.
 - fra serveren: `{"t":"start","name":"…","room":"…","id":"…"}` og `{"t":"stop","name":"…","room":"…","id":"…"}`

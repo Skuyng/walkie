@@ -615,6 +615,7 @@ private struct AccountGate: View {
 private struct GroupEditor: View {
     @ObservedObject var session: WalkieSession
     @State private var draftName = ""
+    @State private var draftPassword = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -627,6 +628,11 @@ private struct GroupEditor: View {
                 .autocorrectionDisabled()
                 .submitLabel(.done)
                 .glassFieldChrome()
+            SecureField("Passord (valgfritt)", text: $draftPassword)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textContentType(.password)
+                .glassFieldChrome()
             HStack(spacing: 10) {
                 Button(action: createTapped) {
                     Text("Opprett gruppe")
@@ -635,7 +641,7 @@ private struct GroupEditor: View {
                 .buttonStyle(.glassProminent)
                 .tint(.red)
                 Button(action: joinTapped) {
-                    Text("Be om å bli med")
+                    Text(joinTitle)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glass)
@@ -644,17 +650,25 @@ private struct GroupEditor: View {
         }
     }
 
+    private var joinTitle: String {
+        draftPassword.isEmpty ? "Be om å bli med" : "Bli med"
+    }
+
     private func createTapped() {
-        let saved = session.createGroup(named: draftName)
+        let saved = session.createGroup(named: draftName, password: draftPassword)
         if saved {
             draftName = ""
+            draftPassword = ""
         }
     }
 
     private func joinTapped() {
-        let saved = session.requestJoin(named: draftName)
+        let saved = draftPassword.isEmpty
+            ? session.requestJoin(named: draftName)
+            : session.joinWithPassword(named: draftName, password: draftPassword)
         if saved {
             draftName = ""
+            draftPassword = ""
         }
     }
 }
@@ -727,8 +741,18 @@ private struct GroupRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text(title)
+                Text(group.name)
                     .font(.headline)
+                if group.locked {
+                    Image(systemName: "lock.fill")
+                        .font(.caption.weight(.semibold))
+                        .accessibilityLabel("Passord")
+                }
+                if group.admin {
+                    Text("admin")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 8)
                 Button(talkTitle, action: select)
                     .buttonStyle(.glass)
@@ -748,10 +772,6 @@ private struct GroupRow: View {
         }
         .padding(12)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-    }
-
-    private var title: String {
-        group.admin ? "\(group.name) · admin" : group.name
     }
 
     private var talkTitle: String {
@@ -781,6 +801,7 @@ private struct AdminTools: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            PasswordEditor(session: session, groupID: group.id, locked: group.locked)
             HStack(spacing: 8) {
                 TextField("Brukernavn", text: $inviteName)
                     .textInputAutocapitalization(.never)
@@ -807,6 +828,48 @@ private struct AdminTools: View {
     private func invite() {
         let saved = session.invite(room: group.id, username: inviteName)
         if saved { inviteName = "" }
+    }
+}
+
+private struct PasswordEditor: View {
+    @ObservedObject var session: WalkieSession
+    let groupID: String
+    let locked: Bool
+    @State private var password = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SecureField(placeholder, text: $password)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textContentType(.password)
+                .submitLabel(.done)
+                .onSubmit(save)
+                .glassFieldChrome()
+            HStack(spacing: 8) {
+                Button("Lagre passord", action: save)
+                    .buttonStyle(.glass)
+                if locked {
+                    Button("Fjern passord", action: clear)
+                        .buttonStyle(.glass)
+                }
+            }
+        }
+    }
+
+    private var placeholder: String {
+        locked ? "Nytt passord" : "Passord (valgfritt)"
+    }
+
+    private func save() {
+        guard !password.isEmpty else { return }
+        let saved = session.setGroupPassword(room: groupID, password: password)
+        if saved { password = "" }
+    }
+
+    private func clear() {
+        let saved = session.setGroupPassword(room: groupID, password: "")
+        if saved { password = "" }
     }
 }
 

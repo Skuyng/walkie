@@ -83,8 +83,17 @@ final class WalkieSocket: NSObject, URLSessionWebSocketDelegate {
         sendEncodable(Command(t: "logout"), completion: completion)
     }
 
-    func sendCreateGroup(name: String) {
-        sendEncodable(Command(t: "createGroup", name: name))
+    func sendCreateGroup(name: String, password: String) {
+        let secret = password.isEmpty ? nil : password
+        sendEncodable(Command(t: "createGroup", name: name, password: secret))
+    }
+
+    func sendJoinWithPassword(name: String, password: String) {
+        sendEncodable(Command(t: "joinWithPassword", name: name, password: password))
+    }
+
+    func sendSetPassword(room: String, password: String) {
+        sendEncodable(Command(t: "setPassword", room: room, password: password))
     }
 
     func sendInvite(room: String, username: String) {
