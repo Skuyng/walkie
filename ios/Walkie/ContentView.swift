@@ -886,8 +886,10 @@ private struct ListenVolumePopover: View {
 }
 
 /// Owns the step counter so a gain update does not rebuild the drag gesture.
+/// Main-actor: the drag runs on the UI thread and writes the session gain.
+@MainActor
 private final class VolumeDragActions {
-    var set: (Double) -> Void = { _ in }
+    var set: @MainActor (Double) -> Void = { _ in }
     var lastStep = -1
 
     static let steps = 20
@@ -934,7 +936,7 @@ private struct VerticalListenSlider: View {
         .accessibilityValue(percentLabel)
         .accessibilityAdjustableAction { direction in
             let delta = direction == .increment ? 0.05 : -0.05
-            actions.apply(session.listenGain + delta, session: session, onInteract: onInteract)
+            actions.apply(gain: session.listenGain + delta, session: session, onInteract: onInteract)
         }
         .onAppear(perform: bind)
     }
@@ -948,7 +950,7 @@ private struct VerticalListenSlider: View {
         let session = session
         let onInteract = onInteract
         actions.set = { [actions] gain in
-            actions.apply(gain, session: session, onInteract: onInteract)
+            actions.apply(gain: gain, session: session, onInteract: onInteract)
         }
     }
 }
