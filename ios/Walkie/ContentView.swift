@@ -136,10 +136,9 @@ struct ContentView: View {
 
     private var talkScreen: some View {
         GeometryReader { geo in
-            let lane = showListenVolume ? VolumeLane.extraLeading : 0
-            let column = geo.size.width - 32 - lane
+            let reserve = showListenVolume ? VolumeBar.blockHeight + 16 : 0
             let baseSide = min(geo.size.width - 64, max(220, geo.size.height - 288))
-            let side = showListenVolume ? min(baseSide * 0.92, column - 24) : baseSide
+            let side = showListenVolume ? min(baseSide, max(180, geo.size.height - 288 - reserve)) : baseSide
             ZStack {
                 GlassEffectContainer(spacing: 16) {
                     VStack(spacing: 16) {
@@ -148,10 +147,15 @@ struct ContentView: View {
                             JoinBanner(text: session.joinProblem(for: session.talkGroup))
                             Spacer(minLength: 0)
                             talkButton(side: side)
+                            if showListenVolume {
+                                Color.clear
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: VolumeBar.blockHeight)
+                                    .background(volumeSlotAnchor)
+                            }
                             HomePresence(session: session)
                             Spacer(minLength: 0)
                         }
-                        .padding(.leading, lane)
                         TalkBottomBar(
                             session: session,
                             link: linkAction,
@@ -161,7 +165,6 @@ struct ContentView: View {
                             onDark: enterDarkMode,
                             onLink: linkTapped
                         )
-                        .background(bottomBarAnchor)
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 4)
@@ -184,14 +187,13 @@ struct ContentView: View {
                 listenChrome
                     .padding(.bottom, 92)
             }
-            .overlayPreferenceValue(TalkChromeKey.self) { chrome in
+            .overlayPreferenceValue(VolumeSlotKey.self) { slot in
                 GeometryReader { proxy in
-                    if showListenVolume && proxy.size.width > 1 {
+                    if showListenVolume && slot.width > 1 && proxy.size.width > 1 {
                         ListenVolumePopover(
                             session: session,
                             bounds: proxy.size,
-                            pill: chrome.pill,
-                            bar: chrome.bar,
+                            slot: slot,
                             onDismiss: hideListenVolume,
                             onInteract: pokeListenVolume
                         )
@@ -376,17 +378,15 @@ struct ContentView: View {
         GeometryReader { proxy in
             Color.clear
                 .preference(key: ChannelPillAnchorKey.self, value: proxy.frame(in: .named("talk")))
-                .preference(key: TalkChromeKey.self, value: TalkChrome(pill: proxy.frame(in: .named("talk")), bar: .zero))
         }
         .allowsHitTesting(false)
     }
 
-    private var bottomBarAnchor: some View {
+    /// Reserved gap under Talk. The glass slider is drawn in this rect, so it cannot cover the button or the talker line.
+    private var volumeSlotAnchor: some View {
         GeometryReader { proxy in
-            Color.clear.preference(
-                key: TalkChromeKey.self,
-                value: TalkChrome(pill: .zero, bar: proxy.frame(in: .named("talk")))
-            )
+            Color.clear
+                .preference(key: VolumeSlotKey.self, value: proxy.frame(in: .named("talk")))
         }
         .allowsHitTesting(false)
     }
@@ -862,22 +862,14 @@ private struct ChannelPillAnchorKey: PreferenceKey {
     }
 }
 
-/// Pill and bottom-bar frames in the talk coordinate space, so the volume slider can sit between them.
-private struct TalkChrome: Equatable {
-    var pill: CGRect = .zero
-    var bar: CGRect = .zero
-}
+/// Horizontal slot under the Talk button, in the talk coordinate space.
+private struct VolumeSlotKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
 
-private struct TalkChromeKey: PreferenceKey {
-    static var defaultValue = TalkChrome()
-
-    static func reduce(value: inout TalkChrome, nextValue: () -> TalkChrome) {
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         let next = nextValue()
-        if next.pill.width > 0 {
-            value.pill = next.pill
-        }
-        if next.bar.width > 0 {
-            value.bar = next.bar
+        if next.width > 0 {
+            value = next
         }
     }
 }
@@ -1335,37 +1327,23 @@ private struct TalkBottomBar: View {
     }
 }
 
-/// Leading column reserved for the volume track. Content beside it starts at `contentStart`.
-private enum VolumeLane {
-    static let screenInset: CGFloat = 16
-    static let trackWidth: CGFloat = 36
-    static let touchWidth: CGFloat = 48
-    static let contentGap: CGFloat = 12
-    static let barClearance: CGFloat = 12
-    static let pillClearance: CGFloat = 12
+/// Horizontal volume bar reserved under Talk. The touch row is taller than the glass track.
+private enum VolumeBar {
     static let labelHeight: CGFloat = 18
     static let labelGap: CGFloat = 6
-    static let maxTrack: CGFloat = 260
-
-    static var contentStart: CGFloat { screenInset + trackWidth + contentGap }
-    /// Added on top of the screen's existing 16 pt padding.
-    static var extraLeading: CGFloat { contentStart - screenInset }
-    static var centerX: CGFloat { screenInset + trackWidth / 2 }
-}
-
-private struct VolumePlacement {
-    var centerY: CGFloat
-    var track: CGFloat
-    var block: CGFloat
+    static let trackHeight: CGFloat = 36
+    static let touchHeight: CGFloat = 48
+    static let blockHeight: CGFloat = labelHeight + labelGap + touchHeight
+    static let maxWidth: CGFloat = 300
+    static let sideInset: CGFloat = 32
 }
 
 /// Full-screen layer so the slider's frame sits inside a parent that can hit-test it.
-/// The track stays in the leading margin, between the channel pill and the bottom bar.
+/// The track is centered in the reserved slot between Talk and the talker line.
 private struct ListenVolumePopover: View {
     var session: WalkieSession
     var bounds: CGSize
-    var pill: CGRect
-    var bar: CGRect
+    var slot: CGRect
     var onDismiss: () -> Void
     var onInteract: () -> Void
 
@@ -1375,51 +1353,43 @@ private struct ListenVolumePopover: View {
                 .frame(width: bounds.width, height: bounds.height)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onDismiss)
-            sliderColumn
+            sliderRow
         }
         .frame(width: bounds.width, height: bounds.height)
     }
 
+    private var sliderWidth: CGFloat {
+        let room = min(slot.width, max(0, bounds.width - VolumeBar.sideInset * 2))
+        return min(VolumeBar.maxWidth, room)
+    }
+
     @ViewBuilder
-    private var sliderColumn: some View {
-        if let place = placement {
-            VStack(spacing: VolumeLane.labelGap) {
+    private var sliderRow: some View {
+        if slot.width > 1 && slot.height > 1 && sliderWidth > 1 {
+            VStack(spacing: VolumeBar.labelGap) {
                 Text(percentLabel)
                     .font(.system(size: 13, weight: .semibold).monospacedDigit())
                     .foregroundStyle(.white)
                     .shadow(color: .black.opacity(0.55), radius: 3, y: 1)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                    .frame(width: VolumeLane.touchWidth, height: VolumeLane.labelHeight)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: VolumeBar.labelHeight)
                     .contentShape(Rectangle())
                     .onTapGesture(perform: onInteract)
-                VerticalListenSlider(
+                HorizontalListenSlider(
                     session: session,
-                    trackHeight: place.track,
+                    trackWidth: sliderWidth,
                     onInteract: onInteract
                 )
             }
-            .frame(width: VolumeLane.touchWidth, height: place.block)
-            .position(x: VolumeLane.centerX, y: place.centerY)
+            .frame(width: sliderWidth, height: VolumeBar.blockHeight)
+            .position(x: slot.midX, y: slot.midY)
         }
     }
 
     private var percentLabel: String {
         "\(Int((session.listenGain * 100).rounded()))%"
-    }
-
-    /// Height comes from the gap under the pill and 12 pt above the bar, capped at 260.
-    private var placement: VolumePlacement? {
-        guard pill.width > 1, bar.width > 1, bar.minY > pill.maxY else { return nil }
-        let labelBlock = VolumeLane.labelHeight + VolumeLane.labelGap
-        let top = pill.maxY + VolumeLane.pillClearance
-        let bottom = bar.minY - VolumeLane.barClearance
-        let span = bottom - top
-        let track = min(VolumeLane.maxTrack, span - labelBlock)
-        guard track >= VolumeLane.trackWidth else { return nil }
-        let block = labelBlock + track
-        let extra = max(0, span - block)
-        return VolumePlacement(centerY: top + extra / 2 + block / 2, track: track, block: block)
     }
 }
 
@@ -1446,9 +1416,9 @@ private final class VolumeDragActions {
     }
 }
 
-private struct VerticalListenSlider: View {
+private struct HorizontalListenSlider: View {
     var session: WalkieSession
-    var trackHeight: CGFloat
+    var trackWidth: CGFloat
     var onInteract: () -> Void
     @State private var actions = VolumeDragActions()
 
@@ -1456,17 +1426,17 @@ private struct VerticalListenSlider: View {
         ZStack {
             VolumeLevelTrack(
                 fraction: session.listenGain,
-                width: VolumeLane.trackWidth,
-                height: trackHeight
+                width: trackWidth,
+                height: VolumeBar.trackHeight
             )
             VolumeDragTarget(
-                width: VolumeLane.touchWidth,
-                height: trackHeight,
+                width: trackWidth,
+                height: VolumeBar.touchHeight,
                 actions: actions
             )
             .equatable()
         }
-        .frame(width: VolumeLane.touchWidth, height: trackHeight)
+        .frame(width: trackWidth, height: VolumeBar.touchHeight)
         .accessibilityElement()
         .accessibilityLabel(session.t(.incomingVolume))
         .accessibilityValue(percentLabel)
@@ -1505,11 +1475,11 @@ private struct VolumeLevelTrack: View {
                 .fill(Color.white.opacity(0.06))
                 .frame(width: width, height: height)
                 .glassEffect(.regular, in: Capsule())
-                .overlay(alignment: .bottom) {
+                .overlay(alignment: .leading) {
                     Capsule()
                         .fill(Self.level)
-                        .frame(width: max(0, width - 8), height: filledHeight)
-                        .padding(.bottom, 4)
+                        .frame(width: filledWidth, height: max(0, height - 8))
+                        .padding(.leading, 4)
                 }
                 .clipShape(Capsule())
         }
@@ -1517,9 +1487,9 @@ private struct VolumeLevelTrack: View {
         .allowsHitTesting(false)
     }
 
-    private var filledHeight: CGFloat {
+    private var filledWidth: CGFloat {
         let clamped = CGFloat(min(1, max(0, fraction)))
-        let inner = max(0, height - 8)
+        let inner = max(0, width - 8)
         let filled = inner * clamped
         let nub: CGFloat = clamped > 0 ? 10 : 0
         return max(nub, filled)
@@ -1543,9 +1513,9 @@ private struct VolumeDragTarget: View, Equatable {
             .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        let span = max(height, 1)
-                        let y = min(max(0, value.location.y), span)
-                        actions.set(1 - Double(y / span))
+                        let span = max(width, 1)
+                        let x = min(max(0, value.location.x), span)
+                        actions.set(Double(x / span))
                     }
             )
     }
