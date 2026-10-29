@@ -169,6 +169,8 @@ enum LKey {
     case invitation
     case fromPerson
     case searchUser
+    case searchPrompt
+    case noUserMatches
     case waitingFor
     case wantsDirect
     case requestSent
@@ -309,6 +311,8 @@ enum L10n {
         case .invitation: return english ? "Invitation" : "Invitasjon"
         case .fromPerson: return english ? "From %@" : "Fra %@"
         case .searchUser: return english ? "Find user" : "Søk bruker"
+        case .searchPrompt: return english ? "Name or username" : "Navn eller brukernavn"
+        case .noUserMatches: return english ? "No matches. Try another name or username." : "Ingen treff. Prøv et annet navn eller brukernavn."
         case .waitingFor: return english ? "Waiting for %@" : "Venter på %@"
         case .wantsDirect: return english ? "Wants to talk directly" : "Vil snakke direkte"
         case .requestSent: return english ? "The request was sent" : "Forespørselen er sendt"

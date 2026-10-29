@@ -193,6 +193,42 @@ async function startServer() {
   send(ada, { t: 'searchUsers', username: '@ingen-slik' });
   const missed = jsonText(await waitFor(ada.inbox, (entry) => !entry.bin && entry.text.includes('Fant ikke brukeren'), 4000, missAt));
   if (missed.t !== 'userSearch' || (missed.matches || []).length) throw new Error('missing user was found ' + JSON.stringify(missed));
+
+  const tommy = await connect(server.url);
+  signup(tommy, 'tommy', 'Tommy Espégård Risnes', 'secret4');
+  await waitFor(tommy.inbox, (entry) => !entry.bin && entry.text.includes('"session"'));
+  const tom = await connect(server.url);
+  signup(tom, 'tom', 'Tom', 'secret5');
+  await waitFor(tom.inbox, (entry) => !entry.bin && entry.text.includes('"session"'));
+  async function findUsers(username) {
+    const at = ada.inbox.length;
+    send(ada, { t: 'searchUsers', username });
+    return jsonText(await waitFor(ada.inbox, (entry) => {
+      if (entry.bin) return false;
+      try { return JSON.parse(entry.text).t === 'userSearch'; } catch { return false; }
+    }, 4000, at));
+  }
+  const byTom = await findUsers('tom');
+  const tomNames = (byTom.matches || []).map((item) => item.username);
+  if (tomNames[0] !== 'tom') throw new Error('exact tom should rank first ' + JSON.stringify(byTom));
+  if (!tomNames.includes('tommy') || tomNames.indexOf('tom') > tomNames.indexOf('tommy')) {
+    throw new Error('tommy should follow the exact tom ' + JSON.stringify(byTom));
+  }
+  for (const query of ['tomy', 'thommy', 'risnes', 'espegard', 'R']) {
+    const hit = await findUsers(query);
+    const row = (hit.matches || []).find((item) => item.username === 'tommy');
+    if (!row || !String(row.name).includes('Risnes') || !String(row.username)) {
+      throw new Error('search ' + query + ' missed tommy ' + JSON.stringify(hit));
+    }
+  }
+  const selfName = await findUsers('ada');
+  if ((selfName.matches || []).some((item) => item.username === 'ada')) throw new Error('search returned self ' + JSON.stringify(selfName));
+  const bySku = await findUsers('Sku');
+  if ((bySku.matches || []).some((item) => item.username === 'ada')) throw new Error('display search returned self ' + JSON.stringify(bySku));
+  if (!(bySku.matches || []).some((item) => item.username === 'bob' && item.name === 'Sku')) {
+    throw new Error('display search missed bob ' + JSON.stringify(bySku));
+  }
+  if ((byTom.matches || []).length > 30) throw new Error('search returned more than 30');
   const caraMark = cara.inbox.length;
   ada.ws.send(frame);
   await new Promise((resolve) => setTimeout(resolve, 250));

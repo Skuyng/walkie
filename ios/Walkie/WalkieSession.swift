@@ -30,6 +30,8 @@ final class WalkieSession {
     private(set) var listenGain: Double
     private(set) var userMatches: [UserMatch] = []
     private(set) var contactNote = ""
+    private(set) var userSearchScope: UserSearchScope = .direct
+    private(set) var userSearchSettled = false
     private(set) var signedIn = false
     private(set) var restoringSession = false
     private(set) var accountUsername = ""
@@ -169,6 +171,7 @@ final class WalkieSession {
     /// Talk-stop waits until the release tail has actually been sent.
     private var pendingStop = false
     private var userSearchQuery = ""
+    private var userSearchTask: Task<Void, Never>?
     private var pendingAdd = ""
     private var preferTalk: String?
     private var reconnectAttempt = 0
@@ -378,6 +381,10 @@ final class WalkieSession {
         userMatches = []
         contactNote = ""
         userSearchQuery = ""
+        userSearchSettled = false
+        userSearchScope = .direct
+        userSearchTask?.cancel()
+        userSearchTask = nil
         pendingAdd = ""
         talkGroup = ""
         room = ""
@@ -566,20 +573,62 @@ final class WalkieSession {
         connectIfNeeded(overridingManual: true)
     }
 
-    func searchUsers(raw: String) {
+    /// Live search. Waits a quarter second so each keystroke does not hit the server.
+    func scheduleUserSearch(raw: String, scope: UserSearchScope) {
         let query = Self.contactQuery(raw)
+        if query.isEmpty {
+            guard userSearchScope == scope else { return }
+            userSearchTask?.cancel()
+            userSearchTask = nil
+            userSearchQuery = ""
+            userSearchSettled = false
+            userMatches = []
+            if contactNote == "Fant ikke brukeren" || contactNote == "Skriv et brukernavn." {
+                contactNote = ""
+            }
+            return
+        }
+        userSearchTask?.cancel()
+        userSearchScope = scope
+        userSearchQuery = query
+        userSearchSettled = false
+        userMatches = []
+        if contactNote == "Fant ikke brukeren" || contactNote == "Skriv et brukernavn." {
+            contactNote = ""
+        }
+        userSearchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            guard self.userSearchQuery == query, self.userSearchScope == scope else { return }
+            self.sendUserSearch(raw: query, scope: scope)
+        }
+    }
+
+    func searchUsers(raw: String, scope: UserSearchScope = .direct) {
+        userSearchTask?.cancel()
+        userSearchTask = nil
+        sendUserSearch(raw: raw, scope: scope)
+    }
+
+    private func sendUserSearch(raw: String, scope: UserSearchScope) {
+        let query = Self.contactQuery(raw)
+        userSearchScope = scope
         userSearchQuery = query
         pendingAdd = ""
-        userMatches = []
+        userSearchSettled = false
         guard !query.isEmpty else {
-            contactNote = "Skriv et brukernavn."
+            userMatches = []
+            contactNote = ""
             return
         }
         guard signedIn, socketOpen else {
+            userMatches = []
+            userSearchSettled = true
             contactNote = "Logg inn"
             return
         }
         contactNote = ""
+        userMatches = []
         socket.sendSearchUsers(username: query)
     }
 
@@ -1094,7 +1143,12 @@ final class WalkieSession {
         case .userSearch(let query, let matches, let error):
             guard query == userSearchQuery else { return }
             userMatches = matches
-            contactNote = matches.isEmpty ? (error.isEmpty ? "Fant ikke brukeren" : error) : ""
+            userSearchSettled = true
+            if !matches.isEmpty || error.isEmpty || error == "Fant ikke brukeren" {
+                contactNote = ""
+            } else {
+                contactNote = error
+            }
         case .reported:
             suggestsSettings = false
             errorNotice = .key(.reportSent)
@@ -1157,6 +1211,10 @@ final class WalkieSession {
                 directRequests = []
                 userMatches = []
                 contactNote = ""
+                userSearchQuery = ""
+                userSearchSettled = false
+                userSearchTask?.cancel()
+                userSearchTask = nil
                 audioReady = false
                 hasConnectedOnce = false
                 engine.stop()
@@ -1639,6 +1697,11 @@ enum ListenOutput: String {
     case speaker
     case earpiece
     case mute
+}
+
+enum UserSearchScope: Equatable {
+    case direct
+    case invite(String)
 }
 
 struct UserMatch: Identifiable, Equatable, Decodable {

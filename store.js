@@ -117,14 +117,105 @@ function namesMatch(left, right) {
   return String(left || '').trim().toLowerCase() === String(right || '').trim().toLowerCase();
 }
 
-function rankContact(user, needle) {
-  const username = String(user.username || '').trim().toLowerCase();
-  const display = String(user.displayName || '').trim().toLowerCase();
-  if (username === needle) return 0;
-  if (display === needle) return 1;
-  if (username.startsWith(needle)) return 2;
-  if (username.includes(needle) || display.includes(needle)) return 3;
+/// Same folding as Postgres unaccent + lower: accents drop, æ → ae, ø → o, å → a.
+function foldSearch(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/æ/g, 'ae')
+    .replace(/ø/g, 'o')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function levenshtein(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  const m = a.length;
+  const n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  if (Math.abs(m - n) > 2) return 3;
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    const aCode = a.charCodeAt(i - 1);
+    for (let j = 1; j <= n; j++) {
+      const cost = aCode === b.charCodeAt(j - 1) ? 0 : 1;
+      const del = prev[j] + 1;
+      const ins = curr[j - 1] + 1;
+      const sub = prev[j - 1] + cost;
+      const best = del < ins ? del : ins;
+      curr[j] = best < sub ? best : sub;
+      if (curr[j] < rowMin) rowMin = curr[j];
+    }
+    if (rowMin > 2) return 3;
+    const swap = prev;
+    prev = curr;
+    curr = swap;
+  }
+  return prev[n];
+}
+
+function typoLimit(length) {
+  if (length < 3) return 0;
+  if (length <= 5) return 1;
+  return 2;
+}
+
+/// 0 exact, 1 prefix (including a word in a full name), 2 substring, 3 typo, 4 miss.
+function tokenRank(token, username, display, words) {
+  if (!token) return 4;
+  if (username === token || display === token) return 0;
+  if (username.startsWith(token) || display.startsWith(token) || words.some((word) => word.startsWith(token))) return 1;
+  if (username.includes(token) || display.includes(token)) return 2;
+  const limit = typoLimit(token.length);
+  if (!limit) return 4;
+  const close = (word) => {
+    if (!word || Math.abs(word.length - token.length) > limit) return false;
+    const dist = levenshtein(token, word);
+    return dist > 0 && dist <= limit;
+  };
+  if (close(username) || words.some(close)) return 3;
   return 4;
+}
+
+function rankContact(user, rawNeedle) {
+  const needle = foldSearch(rawNeedle);
+  if (!needle) return 4;
+  const username = foldSearch(user.username);
+  const display = foldSearch(user.displayName || user.display_name || '');
+  if (username === needle || (display && display === needle)) return 0;
+  const words = display ? display.split(' ') : [];
+  const tokens = needle.split(' ').filter(Boolean);
+  if (!tokens.length) return 4;
+  let worst = 0;
+  for (const token of tokens) {
+    const rank = tokenRank(token, username, display, words);
+    if (rank >= 4) return 4;
+    if (rank > worst) worst = rank;
+  }
+  return worst;
+}
+
+function shapeSearchHits(rows, needle) {
+  return rows
+    .map((row) => ({
+      row,
+      rank: rankContact({ username: row.username, displayName: row.display_name || row.displayName || '' }, needle)
+    }))
+    .filter((item) => item.rank < 4)
+    .sort((a, b) => a.rank - b.rank || foldSearch(a.row.username).localeCompare(foldSearch(b.row.username)))
+    .slice(0, 30)
+    .map((item) => ({
+      username: item.row.username,
+      name: item.row.display_name || item.row.displayName || '',
+      state: item.row.state
+    }));
 }
 
 function directRoomId(idA, idB) {
@@ -576,18 +667,16 @@ class JsonStore {
 
   searchUsers(fromId, query) {
     return this.enqueue(async () => {
-      const needle = String(query || '').trim().toLowerCase();
+      const needle = foldSearch(query);
       if (!needle) return [];
-      return this.data.users
-        .map((user) => ({ user, rank: rankContact(user, needle) }))
-        .filter((item) => item.rank < 4)
-        .sort((a, b) => a.rank - b.rank || String(a.user.username).localeCompare(String(b.user.username)))
-        .slice(0, 8)
-        .map((item) => ({
-          username: item.user.username,
-          name: item.user.displayName || '',
-          state: this.contactState(fromId, item.user.id)
+      const rows = this.data.users
+        .filter((user) => user.id !== fromId)
+        .map((user) => ({
+          username: user.username,
+          display_name: user.displayName || '',
+          state: this.contactState(fromId, user.id)
         }));
+      return shapeSearchHits(rows, needle);
     });
   }
 
@@ -861,6 +950,9 @@ class PgStore {
   constructor(pool) {
     this.kind = 'postgres';
     this.pool = pool;
+    this.userSearchFold = false;
+    this.userSearchTrgm = false;
+    this.userSearchLev = false;
   }
 
   async open() {
@@ -940,6 +1032,55 @@ class PgStore {
         talk_ms BIGINT NOT NULL DEFAULT 0
       );
     `);
+    await this.ensureUserSearch();
+  }
+
+  /// pg_trgm + unaccent, created on startup. Search still runs if an extension is missing.
+  async ensureUserSearch() {
+    try {
+      await this.pool.query('CREATE EXTENSION IF NOT EXISTS unaccent');
+      await this.pool.query(`
+        CREATE OR REPLACE FUNCTION walkie_fold(input text)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        PARALLEL SAFE
+        AS $$
+          SELECT btrim(regexp_replace(lower(unaccent(coalesce(input, ''))), '[[:space:]]+', ' ', 'g'));
+        $$
+      `);
+      this.userSearchFold = true;
+    } catch (error) {
+      this.userSearchFold = false;
+      console.error('user search fold unavailable', error);
+    }
+    try {
+      await this.pool.query('CREATE EXTENSION IF NOT EXISTS pg_trgm');
+      this.userSearchTrgm = true;
+    } catch (error) {
+      this.userSearchTrgm = false;
+      console.error('pg_trgm unavailable', error);
+    }
+    try {
+      await this.pool.query('CREATE EXTENSION IF NOT EXISTS fuzzystrmatch');
+      this.userSearchLev = true;
+    } catch (error) {
+      this.userSearchLev = false;
+      console.error('fuzzystrmatch unavailable', error);
+    }
+    if (!this.userSearchFold || !this.userSearchTrgm) return;
+    try {
+      await this.pool.query(`
+        CREATE INDEX IF NOT EXISTS users_username_fold_trgm
+          ON users USING gin (walkie_fold(username) gin_trgm_ops)
+      `);
+      await this.pool.query(`
+        CREATE INDEX IF NOT EXISTS users_display_fold_trgm
+          ON users USING gin (walkie_fold(display_name) gin_trgm_ops)
+      `);
+    } catch (error) {
+      console.error('user search index unavailable', error);
+    }
   }
 
   async createUser(username, displayName, password) {
@@ -1420,15 +1561,9 @@ class PgStore {
     }
   }
 
-  async searchUsers(fromId, query) {
-    const exact = String(query || '').trim().toLowerCase();
-    if (!exact) return [];
-    const like = '%' + exact.replace(/[\\%_]/g, (ch) => '\\' + ch) + '%';
-    const prefix = exact.replace(/[\\%_]/g, (ch) => '\\' + ch) + '%';
-    const result = await this.pool.query(
-      `SELECT u.username, u.display_name,
+  userSearchSelect() {
+    return `SELECT u.username, u.display_name,
          CASE
-           WHEN u.id = $1 THEN 'self'
            WHEN EXISTS (
              SELECT 1 FROM blocks b
              WHERE (b.user_id = $1 AND b.blocked_id = u.id)
@@ -1449,24 +1584,71 @@ class PgStore {
            ELSE 'add'
          END AS state
        FROM users u
-       WHERE LOWER(TRIM(u.username)) LIKE $2 ESCAPE '\\'
-          OR LOWER(TRIM(u.display_name)) LIKE $2 ESCAPE '\\'
-       ORDER BY
-         CASE
-           WHEN LOWER(TRIM(u.username)) = $3 THEN 0
-           WHEN LOWER(TRIM(u.display_name)) = $3 THEN 1
-           WHEN LOWER(TRIM(u.username)) LIKE $4 ESCAPE '\\' THEN 2
-           ELSE 3
-         END,
-         u.username
-       LIMIT 8`,
-      [fromId, like, exact, prefix]
+       WHERE u.id <> $1`;
+  }
+
+  async searchUsers(fromId, query) {
+    const needle = foldSearch(query);
+    if (!needle) return [];
+    let rows;
+    if (this.userSearchFold && (this.userSearchTrgm || this.userSearchLev)) {
+      try {
+        rows = await this.searchUserCandidates(fromId, needle);
+      } catch (error) {
+        console.error('fuzzy user search failed', error);
+        rows = null;
+      }
+    }
+    if (!rows) {
+      const result = await this.pool.query(this.userSearchSelect(), [fromId]);
+      rows = result.rows;
+    }
+    return shapeSearchHits(rows, needle);
+  }
+
+  /// ILIKE covers exact, prefix, and any part of a name. pg_trgm covers typos like tomy → tommy.
+  async searchUserCandidates(fromId, needle) {
+    const tokens = needle.split(' ').filter(Boolean).slice(0, 6);
+    const params = [fromId];
+    const clauses = [];
+    for (const token of tokens) {
+      const escaped = token.replace(/[\\%_]/g, (ch) => '\\' + ch);
+      params.push(token);
+      const raw = params.length;
+      params.push('%' + escaped + '%');
+      const like = params.length;
+      const fuzzy = token.length >= 3;
+      const trgmSql = fuzzy && this.userSearchTrgm
+        ? `OR word_similarity($${raw}, uname) >= 0.3 OR word_similarity($${raw}, dname) >= 0.3 OR similarity(uname, $${raw}) >= 0.3`
+        : '';
+      const limit = token.length <= 5 ? 1 : 2;
+      const levSql = fuzzy && this.userSearchLev
+        ? `OR (abs(char_length(uname) - char_length($${raw})) <= ${limit} AND levenshtein(left(uname, 80), left($${raw}, 80)) BETWEEN 1 AND ${limit})
+           OR EXISTS (
+             SELECT 1 FROM unnest(string_to_array(dname, ' ')) AS word
+             WHERE abs(char_length(word) - char_length($${raw})) <= ${limit}
+               AND levenshtein(left(word, 80), left($${raw}, 80)) BETWEEN 1 AND ${limit}
+           )`
+        : '';
+      const fuzzySql = trgmSql + levSql;
+      clauses.push(`(
+        uname LIKE $${like} ESCAPE '\\'
+        OR dname LIKE $${like} ESCAPE '\\'
+        ${fuzzySql}
+      )`);
+    }
+    const result = await this.pool.query(
+      `SELECT username, display_name, state
+       FROM (
+         SELECT s.username, s.display_name, s.state,
+           walkie_fold(s.username) AS uname,
+           walkie_fold(s.display_name) AS dname
+         FROM (${this.userSearchSelect()}) s
+       ) folded
+       WHERE ${clauses.join(' AND ')}`,
+      params
     );
-    return result.rows.map((row) => ({
-      username: row.username,
-      name: row.display_name || '',
-      state: row.state
-    }));
+    return result.rows;
   }
 
   async directRequestsFor(userId) {

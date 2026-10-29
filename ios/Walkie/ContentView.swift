@@ -2112,13 +2112,16 @@ private struct DirectSection: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack(alignment: .center, spacing: 8) {
-                TextField(session.t(.username), text: $username)
+                TextField(session.t(.searchPrompt), text: $username)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
                     .textContentType(nil)
                     .writingToolsBehavior(.disabled)
                     .submitLabel(.search)
                     .onSubmit(search)
+                    .onChange(of: username) { _, newValue in
+                        session.scheduleUserSearch(raw: newValue, scope: .direct)
+                    }
                     .glassFieldChrome()
                     .background {
                         GeometryReader { proxy in
@@ -2136,8 +2139,11 @@ private struct DirectSection: View {
             .onPreferenceChange(FieldHeightKey.self) { height in
                 if height > 0 { fieldHeight = height }
             }
-            ForEach(session.userMatches) { match in
-                UserMatchRow(session: session, match: match)
+            if session.userSearchScope == .direct {
+                ForEach(session.userMatches) { match in
+                    UserMatchRow(session: session, match: match)
+                }
+                UserSearchEmpty(session: session, scope: .direct)
             }
             ForEach(session.directRequests) { request in
                 DirectRequestRow(session: session, request: request)
@@ -2151,27 +2157,50 @@ private struct DirectSection: View {
     }
 
     private func search() {
-        session.searchUsers(raw: username)
+        session.searchUsers(raw: username, scope: .direct)
+    }
+}
+
+private struct UserSearchEmpty: View {
+    var session: WalkieSession
+    var scope: UserSearchScope
+
+    var body: some View {
+        if session.userSearchScope == scope
+            && session.userSearchSettled
+            && session.userMatches.isEmpty
+            && session.contactNote.isEmpty {
+            Text(session.t(.noUserMatches))
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .auroraCard()
+        }
     }
 }
 
 private struct UserMatchRow: View {
     var session: WalkieSession
     let match: UserMatch
+    var onInvite: ((String) -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.headline)
-                if showsHandle {
-                    Text("@\(match.username)")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
+                Text("@\(match.username)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
-            if match.state == "add" {
+            if let onInvite {
+                Button(session.t(.invite)) { onInvite(match.username) }
+                    .buttonStyle(.glassProminent)
+                    .tint(Aurora.teal)
+            } else if match.state == "add" {
                 Button(session.t(.addContact)) {
                     session.addContact(username: match.username)
                 }
@@ -2190,12 +2219,8 @@ private struct UserMatchRow: View {
 
     private var title: String {
         let trimmed = match.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return "@\(match.username)" }
+        if trimmed.isEmpty { return match.username }
         return trimmed
-    }
-
-    private var showsHandle: Bool {
-        !match.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var status: String {
@@ -2410,21 +2435,47 @@ private struct InviteComposer: View {
     let room: String
     @State private var inviteName = ""
 
+    private var scope: UserSearchScope { .invite(room) }
+
     var body: some View {
-        HStack(spacing: 8) {
-            TextField(session.t(.username), text: $inviteName)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .submitLabel(.send)
-                .onSubmit(invite)
-                .glassFieldChrome()
-            Button(session.t(.invite), action: invite)
-                .buttonStyle(.glass)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                TextField(session.t(.searchPrompt), text: $inviteName)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+                    .onSubmit(inviteTyped)
+                    .onChange(of: inviteName) { _, newValue in
+                        session.scheduleUserSearch(raw: newValue, scope: scope)
+                    }
+                    .glassFieldChrome()
+                Button(session.t(.invite), action: inviteTyped)
+                    .buttonStyle(.glass)
+            }
+            if session.userSearchScope == scope {
+                ForEach(session.userMatches) { match in
+                    UserMatchRow(session: session, match: match) { username in
+                        invite(username)
+                    }
+                }
+                UserSearchEmpty(session: session, scope: scope)
+            }
         }
     }
 
-    private func invite() {
-        let saved = session.invite(room: room, username: inviteName)
+    private func inviteTyped() {
+        if session.userSearchScope == scope && session.userMatches.count == 1 {
+            invite(session.userMatches[0].username)
+            return
+        }
+        if session.userSearchScope == scope && !session.userMatches.isEmpty {
+            return
+        }
+        invite(inviteName)
+    }
+
+    private func invite(_ username: String) {
+        let saved = session.invite(room: room, username: username)
         if saved { inviteName = "" }
     }
 }
