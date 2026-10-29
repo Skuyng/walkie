@@ -104,9 +104,11 @@ async function startServer() {
   const versionJson = JSON.parse(version);
   if (versionJson.store !== 'json') throw new Error('expected json store ' + version);
   const personvern = await getText(server.http + '/personvern');
-  if (personvern.status !== 200 || !personvern.body.includes('Lyden lagres ikke') || !personvern.body.includes('never stored')) {
+  if (personvern.status !== 200 || !personvern.body.includes('Lyden lagres ikke') || !personvern.body.includes('never stored') || !personvern.body.includes('Ingen reklame') || !personvern.body.includes('has no ads') || !personvern.body.includes('yngveskutle@gmail.com') || !personvern.body.includes('https://walkie-bc0z.onrender.com')) {
     throw new Error('personvern ' + personvern.status);
   }
+  const privacy = await getText(server.http + '/privacy');
+  if (privacy.status !== 200 || privacy.body !== personvern.body) throw new Error('privacy alias ' + privacy.status);
   const vilkar = await getText(server.http + '/vilkar');
   if (vilkar.status !== 200 || !vilkar.body.includes('nulltoleranse') || !vilkar.body.includes('zero tolerance')) {
     throw new Error('vilkar ' + vilkar.status);

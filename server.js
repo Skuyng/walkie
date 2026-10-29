@@ -101,7 +101,7 @@ const srv = http.createServer((q, r) => {
     return r.end(JSON.stringify({ sha, commit: sha, store: store ? store.kind : 'starting' }));
   }
   if (p === '/') p = '/index.html';
-  if (p === '/personvern') p = '/personvern.html';
+  if (p === '/personvern' || p === '/privacy') p = '/personvern.html';
   if (p === '/vilkar') p = '/vilkar.html';
   const f = path.join(__dirname, 'public', path.normalize(p));
   fs.readFile(f, (e, d) => {
